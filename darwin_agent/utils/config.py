@@ -80,13 +80,19 @@ def load_config(path: str = "config.yaml") -> AgentConfig:
         return config
 
     with open(path, "r") as f:
-        data = yaml.safe_load(f) or {}
+        try:
+            data = yaml.safe_load(f) or {}
+        except yaml.YAMLError as e:
+            raise ValueError(f"Invalid YAML in config file '{path}': {e}") from e
 
     for key in ("starting_capital", "heartbeat_interval", "log_level", "dashboard_port"):
         if key in data:
             setattr(config, key, type(getattr(config, key))(data[key]))
 
     if "markets" in data:
+        # If user explicitly provides markets, treat it as authoritative
+        # to avoid silently keeping the default "crypto" market enabled.
+        config.markets = {}
         for name, mdata in data["markets"].items():
             mc = MarketConfig()
             for k, v in (mdata or {}).items():

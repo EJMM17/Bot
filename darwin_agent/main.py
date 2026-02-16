@@ -189,7 +189,13 @@ def main():
                         help="Check testnet → mainnet migration readiness")
     args = parser.parse_args()
 
-    config = load_config(args.config)
+    try:
+        config = load_config(args.config)
+    except ValueError as e:
+        print(f"\n❌ Configuration error: {e}")
+        print("   Fix config file and try again.")
+        sys.exit(1)
+
     set_config_context(config, args.config)
 
     if args.status:
