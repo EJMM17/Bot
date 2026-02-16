@@ -291,12 +291,28 @@ async def run_diagnostics(api_key: str, api_secret: str,
     session = None
     try:
         timeout = aiohttp.ClientTimeout(total=10, connect=5)
-        session = aiohttp.ClientSession(timeout=timeout)
+        # trust_env=True allows aiohttp to honor HTTP(S)_PROXY and custom CA vars
+        # from the host environment (common in VPS/corporate/CI networks).
+        session = aiohttp.ClientSession(timeout=timeout, trust_env=True)
 
         # ── CHECK 1: DNS Resolution + Basic Connectivity ──
         try:
             async with session.get(f"{base_url}/v5/market/time") as resp:
-                data = await resp.json()
+                # Some environments require proxies and may receive non-JSON
+                # intermediary responses (e.g., HTTP 403 HTML). Handle this
+                # explicitly so diagnostics stay actionable instead of crashing.
+                if resp.status == 403:
+                    report.add(DiagnosticResult(
+                        name=f"Network → {env_name}",
+                        passed=False,
+                        message="HTTP 403 while reaching Bybit",
+                        details="Endpoint reachable, but access is blocked (geo/IP/proxy policy).",
+                        fix="Check your server region/IP and proxy/firewall rules."
+                    ))
+                    report.summary = "Bybit reachable but access blocked (HTTP 403)."
+                    return report
+
+                data = await resp.json(content_type=None)
                 if data.get("retCode") == 0:
                     server_time = int(data["result"]["timeSecond"])
                     report.add(DiagnosticResult(
