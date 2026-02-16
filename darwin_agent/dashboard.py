@@ -282,7 +282,7 @@ label{font-size:11px;color:var(--d);display:block;margin-bottom:4px}
 <tbody id="evo"></tbody></table>
 </div>
 <div class="card full">
-<h2>Recent Trades</h2>
+<h2>Recent Orders (fills)</h2>
 <table><thead><tr><th>Time</th><th>Side</th><th>Symbol</th><th>Price</th><th>Reason</th></tr></thead>
 <tbody id="trd"></tbody></table>
 </div>
@@ -403,7 +403,7 @@ M('Drawdown',h.drawdown_pct?.toFixed(1)+'%',h.drawdown_pct>15?'r':'')+
 M('Status','<span class="badge b'+(h.status==='healthy'?'g':h.status==='critical'?'r':'y')+'">'+h.status+'</span>');
 
 document.getElementById('trade-m').innerHTML=
-M('Trades',h.total_trades)+
+M('Closed Trades',h.total_trades)+
 M('Win Rate',(h.win_rate*100).toFixed(1)+'%',h.win_rate>.52?'g':'r')+
 M('Win Streak',h.win_streak,'g')+
 M('Loss Streak',h.loss_streak,h.loss_streak>=2?'r':'');
@@ -433,7 +433,7 @@ const c=g.final_capital>50?'g':g.final_capital>25?'y':'r';
 eh+=`<tr><td>${esc(g.generation)}</td><td class="${c}">$${g.final_capital?.toFixed(2)}</td>
 <td>${g.total_trades}</td><td>${(g.win_rate*100).toFixed(1)}%</td>
 <td style="max-width:150px;overflow:hidden;text-overflow:ellipsis">${esc(g.cause_of_death||'-')}</td></tr>`}
-document.getElementById('evo').innerHTML=eh||'<tr><td colspan="5" style="color:var(--d)">No history</td></tr>';
+document.getElementById('evo').innerHTML=eh||'<tr><td colspan="5" style="color:var(--d)">No history yet (appears when a generation dies/evolves)</td></tr>';
 
 let th='';
 for(const t of trades.slice(-8).reverse()){
