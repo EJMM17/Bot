@@ -73,17 +73,39 @@ async def handle_config_get(req):
 
 async def handle_config_post(req):
     global _config
-    payload = await req.json()
+    try:
+        payload = await req.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "Invalid JSON payload"}, status=400)
+
+    if not isinstance(payload, dict):
+        return web.json_response({"ok": False, "error": "Payload must be a JSON object"}, status=400)
+
     cfg = _config if _config else load_config(_config_path)
 
     for key in ("starting_capital", "heartbeat_interval", "log_level", "dashboard_port"):
         if key in payload:
-            setattr(cfg, key, type(getattr(cfg, key))(payload[key]))
+            value = payload[key]
+            if value is None:
+                return web.json_response({"ok": False, "error": f"Field '{key}' cannot be null"}, status=400)
+            try:
+                setattr(cfg, key, type(getattr(cfg, key))(value))
+            except (TypeError, ValueError):
+                return web.json_response(
+                    {"ok": False, "error": f"Invalid value for '{key}': {value!r}"},
+                    status=400,
+                )
 
-    if "markets" in payload:
+    if "markets" in payload and payload["markets"] is not None:
+        if not isinstance(payload["markets"], dict):
+            return web.json_response({"ok": False, "error": "Field 'markets' must be an object"}, status=400)
         for name, mdata in payload["markets"].items():
             if name not in cfg.markets:
                 continue
+            if not isinstance(mdata, dict):
+                return web.json_response(
+                    {"ok": False, "error": f"Market '{name}' config must be an object"}, status=400
+                )
             market = cfg.markets[name]
             for field in ("enabled", "api_key", "api_secret", "testnet", "max_allocation_pct"):
                 if field in mdata:
@@ -94,7 +116,11 @@ async def handle_config_post(req):
     except ValueError as e:
         return web.json_response({"ok": False, "error": str(e)}, status=400)
 
-    save_config(cfg, _config_path)
+    try:
+        save_config(cfg, _config_path)
+    except Exception as e:
+        return web.json_response({"ok": False, "error": f"Could not save config: {e}"}, status=500)
+
     _config = cfg
     return web.json_response({"ok": True})
 
