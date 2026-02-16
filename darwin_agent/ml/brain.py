@@ -1,4 +1,4 @@
-"""ML Brain — Q-Learning with linear function approximation."""
+"""ML Brain — Q-Learning with linear function approximation + Prioritized Replay."""
 
 import numpy as np
 import json
@@ -18,6 +18,7 @@ class Experience:
     next_state: Optional[np.ndarray]
     done: bool
     metadata: Dict[str, Any] = field(default_factory=dict)
+    td_error: float = 1.0  # For prioritized replay
 
 
 @dataclass
@@ -53,6 +54,9 @@ class QLearningBrain:
         self.exploitation_count = 0
         self.regime_bonuses: Dict[str, np.ndarray] = {}
 
+        # Tracking for meta-learning: which actions performed well recently
+        self._action_rewards: Dict[int, deque] = {i: deque(maxlen=50) for i in range(self.n_actions)}
+
     def predict_q(self, state: np.ndarray, regime: str = "unknown") -> np.ndarray:
         q = self.weights @ state + self.bias
         if regime in self.regime_bonuses:
@@ -62,7 +66,14 @@ class QLearningBrain:
     def choose_action(self, state: np.ndarray, regime: str = "unknown",
                       health_pct: float = 1.0) -> Tuple[int, Action]:
         self.total_decisions += 1
-        eff_eps = min(0.5, self.epsilon * 2) if health_pct < 0.3 else self.epsilon
+
+        # FIX: When dying, explore LESS (stick to safe strategies), not more
+        if health_pct < 0.3:
+            eff_eps = max(self.epsilon_min, self.epsilon * 0.5)
+        elif health_pct < 0.5:
+            eff_eps = max(self.epsilon_min, self.epsilon * 0.75)
+        else:
+            eff_eps = self.epsilon
 
         if np.random.random() < eff_eps:
             self.exploration_count += 1
@@ -75,19 +86,35 @@ class QLearningBrain:
             self.exploitation_count += 1
             q = self.predict_q(state, regime)
             if health_pct < 0.5:
+                # Penalize aggressive, BOOST conservative
                 for i in self._aggressive_actions():
                     q[i] *= health_pct
+                for i in self._conservative_actions():
+                    q[i] *= (1.0 + (1.0 - health_pct) * 0.5)  # Boost safe actions
             idx = int(np.argmax(q))
 
         return idx, self._decode(idx)
 
     def learn(self, state, action, reward, next_state, done, regime="unknown"):
-        self.memory.append(Experience(state=state, action=action, reward=reward,
-                                      next_state=next_state, done=done,
-                                      metadata={"regime": regime}))
+        # Calculate TD error for prioritized replay
+        cur_q = self.weights[action] @ state + self.bias[action]
+        if done or next_state is None:
+            target = reward
+        else:
+            target = reward + self.gamma * np.max(self.predict_q(next_state, regime))
+        td_error = abs(target - cur_q)
+
+        exp = Experience(state=state, action=action, reward=reward,
+                         next_state=next_state, done=done,
+                         metadata={"regime": regime}, td_error=td_error)
+        self.memory.append(exp)
+
+        # Track action performance
+        self._action_rewards[action].append(reward)
+
         self._update(state, action, reward, next_state, done, regime)
         if len(self.memory) >= self.batch_size:
-            self._replay()
+            self._prioritized_replay()
         self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
 
     def _update(self, state, action, reward, next_state, done, regime):
@@ -101,24 +128,68 @@ class QLearningBrain:
         if regime != "unknown":
             if regime not in self.regime_bonuses:
                 self.regime_bonuses[regime] = np.zeros(self.n_actions)
+            # Exponential moving average for regime bonuses (with decay)
+            decay = 0.99
+            self.regime_bonuses[regime] *= decay
             self.regime_bonuses[regime][action] += self.lr * 0.1 * td
             self.regime_bonuses[regime] = np.clip(self.regime_bonuses[regime], -3, 3)
 
-    def _replay(self):
-        idx = np.random.choice(len(self.memory), min(self.batch_size, len(self.memory)), replace=False)
+    def _prioritized_replay(self):
+        """Prioritized Experience Replay: higher TD-error = more likely to be sampled."""
+        n = len(self.memory)
+        batch_n = min(self.batch_size, n)
+
+        # Compute priorities (|TD| + small epsilon for stability)
+        priorities = np.array([abs(e.td_error) + 0.01 for e in self.memory])
+        probs = priorities / priorities.sum()
+
+        idx = np.random.choice(n, batch_n, replace=False, p=probs)
         for i in idx:
             e = self.memory[i]
-            self._update(e.state, e.action, e.reward, e.next_state, e.done, e.metadata.get("regime", "unknown"))
+            old_q = self.weights[e.action] @ e.state + self.bias[e.action]
+            regime = e.metadata.get("regime", "unknown")
+            if e.done or e.next_state is None:
+                target = e.reward
+            else:
+                target = e.reward + self.gamma * np.max(self.predict_q(e.next_state, regime))
+            # Update TD error for future sampling
+            e.td_error = abs(target - old_q)
+            self._update(e.state, e.action, e.reward, e.next_state, e.done, regime)
 
     def calculate_reward(self, pnl_pct, health_change, trade_duration_minutes, strategy_used):
+        """Improved reward function with normalized units."""
+        # Normalize PnL: clip to reasonable range, asymmetric penalty for losses
         r = pnl_pct * (1.0 if pnl_pct > 0 else 1.5)
-        r += health_change * 0.1
+
+        # Health change normalized (health is 0-100, reward contribution scaled)
+        r += health_change * 0.05
+
+        # Speed bonus: reward efficient wins, no penalty for slow ones
         if pnl_pct > 0 and trade_duration_minutes < 60:
-            r += 0.5
+            r += 0.3
+        elif pnl_pct > 0 and trade_duration_minutes < 180:
+            r += 0.1
+
+        # Hold gets small positive reward (avoiding bad trades is good)
         if strategy_used == "hold":
             r += 0.05
-        r += 0.1
+
+        # Survival bonus (agent lived another cycle)
+        r += 0.05
+
+        # Risk-adjusted: big wins from aggressive sizing should be tempered
+        # (this will be modulated externally by the selector)
         return float(np.clip(r, -10, 10))
+
+    def get_action_performance(self) -> Dict[str, float]:
+        """Return average reward per action for meta-learning."""
+        perf = {}
+        for action_idx, rewards in self._action_rewards.items():
+            if len(rewards) >= 3:
+                action = self._decode(action_idx)
+                key = f"{action.strategy}/{action.sizing}"
+                perf[key] = float(np.mean(list(rewards)))
+        return perf
 
     def _decode(self, idx: int) -> Action:
         ns = len(self.SIZINGS)
@@ -139,6 +210,10 @@ class QLearningBrain:
         ns = len(self.SIZINGS)
         return [i for i in range(self.n_actions) if self.SIZINGS[i % ns] == "aggressive"]
 
+    def _conservative_actions(self):
+        ns = len(self.SIZINGS)
+        return [i for i in range(self.n_actions) if self.SIZINGS[i % ns] == "conservative"]
+
     def export_brain(self):
         return {
             "weights": self.weights.tolist(), "bias": self.bias.tolist(),
@@ -148,6 +223,9 @@ class QLearningBrain:
             "exploration_count": self.exploration_count,
             "exploitation_count": self.exploitation_count,
             "n_features": self.n_features, "n_actions": self.n_actions,
+            "action_rewards": {
+                str(k): list(v) for k, v in self._action_rewards.items() if len(v) > 0
+            },
         }
 
     def import_brain(self, data, mutation_rate=0.05):
@@ -168,6 +246,11 @@ class QLearningBrain:
                     self.regime_bonuses[r] = arr
         if "epsilon" in data:
             self.epsilon = min(0.3, data["epsilon"] * 1.5)
+        if "action_rewards" in data:
+            for k, v in data["action_rewards"].items():
+                idx = int(k)
+                if 0 <= idx < self.n_actions:
+                    self._action_rewards[idx] = deque(v[-20:], maxlen=50)
 
     def save(self, path):
         with open(path, "w") as f:
