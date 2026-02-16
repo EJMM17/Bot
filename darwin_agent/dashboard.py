@@ -3,6 +3,7 @@
 import asyncio
 import json
 import glob
+import os
 
 try:
     from aiohttp import web
@@ -14,6 +15,36 @@ from darwin_agent.utils.config import load_config, save_config, config_to_dict
 _agent = None
 _config = None
 _config_path = "config.yaml"
+_MASKED_SECRET = "********"
+
+
+def _dashboard_token() -> str:
+    """Read optional dashboard token from environment."""
+    return os.environ.get("DARWIN_DASHBOARD_TOKEN", "").strip()
+
+
+def _has_token_auth() -> bool:
+    return bool(_dashboard_token())
+
+
+def _is_authorized(req) -> bool:
+    """Validate Bearer/X-Dashboard-Token when dashboard auth is enabled."""
+    token = _dashboard_token()
+    if not token:
+        return True
+
+    auth_header = req.headers.get("Authorization", "")
+    bearer = auth_header[7:].strip() if auth_header.startswith("Bearer ") else ""
+    x_token = req.headers.get("X-Dashboard-Token", "").strip()
+    query_token = req.query.get("token", "").strip()
+    supplied = bearer or x_token or query_token
+    return bool(supplied) and supplied == token
+
+
+def _require_auth(req):
+    if _is_authorized(req):
+        return None
+    return web.json_response({"ok": False, "error": "Unauthorized"}, status=401)
 
 
 def set_agent(agent):
@@ -67,12 +98,29 @@ async def handle_trades(req):
 
 
 async def handle_config_get(req):
+    auth_error = _require_auth(req)
+    if auth_error:
+        return auth_error
+
     cfg = _config if _config else load_config(_config_path)
-    return web.json_response(config_to_dict(cfg))
+    cfg_data = config_to_dict(cfg)
+
+    # Never expose API secret over HTTP; allow frontend to preserve existing value via mask.
+    for market in cfg_data.get("markets", {}).values():
+        if "api_secret" in market and market["api_secret"]:
+            market["api_secret"] = _MASKED_SECRET
+
+    cfg_data["dashboard_auth_enabled"] = _has_token_auth()
+    return web.json_response(cfg_data)
 
 
 async def handle_config_post(req):
     global _config
+
+    auth_error = _require_auth(req)
+    if auth_error:
+        return auth_error
+
     try:
         payload = await req.json()
     except Exception:
@@ -109,7 +157,11 @@ async def handle_config_post(req):
             market = cfg.markets[name]
             for field in ("enabled", "api_key", "api_secret", "testnet", "max_allocation_pct"):
                 if field in mdata:
-                    setattr(market, field, mdata[field])
+                    value = mdata[field]
+                    # Preserve existing secret if UI sends placeholder or blank value.
+                    if field == "api_secret" and value in (None, "", _MASKED_SECRET):
+                        continue
+                    setattr(market, field, value)
 
     try:
         cfg.validate()
@@ -177,6 +229,14 @@ label{font-size:11px;color:var(--d);display:block;margin-bottom:4px}
 <div><span id="gen" class="tag"></span> <span id="live" class="tag"></span></div>
 </div>
 
+<div class="card full" id="auth-card" style="display:none">
+<h2>Dashboard Login</h2>
+<div class="frm">
+<div class="full"><label>Access Token</label><input id="dash-token" type="password" placeholder="Bearer token"></div>
+<div class="full"><button class="btn" onclick="saveTokenAndLoad()">Unlock</button><div id="auth-msg"></div></div>
+</div>
+</div>
+
 <div class="grid">
 <div class="card">
 <h2>Health</h2>
@@ -233,11 +293,39 @@ label{font-size:11px;color:var(--d);display:block;margin-bottom:4px}
 <script>
 function M(l,v,c=''){return `<div class="m"><span class="l">${l}</span><span class="v ${c}">${v}</span></div>`}
 function hc(p){return p>.7?'var(--g)':p>.4?'var(--y)':'var(--r)'}
+function esc(v){
+  return String(v??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#39;');
+}
+function getStoredToken(){
+  return localStorage.getItem('darwin-dashboard-token')||'';
+}
+
+function authHeaders(base={}){
+  const t=getStoredToken();
+  if(t) base['Authorization']='Bearer '+t;
+  return base;
+}
+
+function saveTokenAndLoad(){
+  const t=document.getElementById('dash-token').value.trim();
+  if(t){
+    localStorage.setItem('darwin-dashboard-token',t);
+  }
+  loadConfig();
+}
 
 async function loadConfig(){
   try{
-    const r=await fetch('/api/config');
+    const r=await fetch('/api/config',{headers:authHeaders()});
+    if(r.status===401){
+      document.getElementById('auth-card').style.display='block';
+      document.getElementById('auth-msg').innerHTML='<span class="y">Token required. Set DARWIN_DASHBOARD_TOKEN and paste token here.</span>';
+      return;
+    }
     const c=await r.json();
+    if(c.dashboard_auth_enabled){
+      document.getElementById('auth-card').style.display='block';
+    }
     const m=(c.markets||{}).crypto||{};
     document.getElementById('cfg-starting-capital').value=c.starting_capital??50;
     document.getElementById('cfg-heartbeat').value=c.heartbeat_interval??45;
@@ -273,7 +361,11 @@ async function saveConfig(){
   const el=document.getElementById('cfg-msg');
   el.textContent='Saving...';
   try{
-    const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    const r=await fetch('/api/config',{method:'POST',headers:authHeaders({'Content-Type':'application/json'}),body:JSON.stringify(payload)});
+    if(r.status===401){
+      el.innerHTML='<span class="r">Unauthorized: invalid dashboard token</span>';
+      return;
+    }
     if(!r.ok){
       const t=await r.text();
       el.innerHTML='<span class="r">Save failed: '+t+'</span>';
@@ -287,7 +379,11 @@ async function saveConfig(){
 
 async function R(){
 try{
-const[sr,hr,tr]=await Promise.all([fetch('/api/status'),fetch('/api/history'),fetch('/api/trades')]);
+const[sr,hr,tr]=await Promise.all([
+  fetch('/api/status'),
+  fetch('/api/history'),
+  fetch('/api/trades')
+]);
 const s=await sr.json(),hi=await hr.json(),trades=await tr.json();
 if(s.error)return;
 const h=s.health||{},r=s.risk||{},b=s.brain||{},pb=s.playbook||{};
@@ -326,7 +422,7 @@ M('Regimes',(b.regimes_learned||[]).join(', ')||'learning...');
 
 let ph='';
 for(const[rg,d]of Object.entries(pb)){
-ph+=`<tr><td>${rg}</td><td><span class="badge bb">${d.best_strategy}</span></td>
+ph+=`<tr><td>${esc(rg)}</td><td><span class="badge bb">${esc(d.best_strategy)}</span></td>
 <td class="${d.win_rate>.5?'g':'r'}">${(d.win_rate*100).toFixed(0)}%</td>
 <td>${d.trades}</td><td class="${d.total_pnl>=0?'g':'r'}">$${d.total_pnl?.toFixed(2)}</td></tr>`}
 document.getElementById('pb').innerHTML=ph||'<tr><td colspan="5" style="color:var(--d)">Learning...</td></tr>';
@@ -334,17 +430,17 @@ document.getElementById('pb').innerHTML=ph||'<tr><td colspan="5" style="color:va
 let eh='';
 for(const g of hi.slice(-8).reverse()){
 const c=g.final_capital>50?'g':g.final_capital>25?'y':'r';
-eh+=`<tr><td>${g.generation}</td><td class="${c}">$${g.final_capital?.toFixed(2)}</td>
+eh+=`<tr><td>${esc(g.generation)}</td><td class="${c}">$${g.final_capital?.toFixed(2)}</td>
 <td>${g.total_trades}</td><td>${(g.win_rate*100).toFixed(1)}%</td>
-<td style="max-width:150px;overflow:hidden;text-overflow:ellipsis">${g.cause_of_death||'-'}</td></tr>`}
+<td style="max-width:150px;overflow:hidden;text-overflow:ellipsis">${esc(g.cause_of_death||'-')}</td></tr>`}
 document.getElementById('evo').innerHTML=eh||'<tr><td colspan="5" style="color:var(--d)">No history</td></tr>';
 
 let th='';
 for(const t of trades.slice(-8).reverse()){
-th+=`<tr><td>${(t.ts||'').substring(11,19)}</td>
-<td class="${t.action==='BUY'?'g':'r'}">${t.action}</td>
-<td>${t.symbol}</td><td>$${t.price?.toFixed(2)}</td>
-<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis">${t.reason||''}</td></tr>`}
+th+=`<tr><td>${esc((t.ts||'').substring(11,19))}</td>
+<td class="${t.action==='BUY'?'g':'r'}">${esc(t.action)}</td>
+<td>${esc(t.symbol)}</td><td>$${t.price?.toFixed(2)}</td>
+<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis">${esc(t.reason||'')}</td></tr>`}
 document.getElementById('trd').innerHTML=th||'<tr><td colspan="5" style="color:var(--d)">No trades</td></tr>';
 
 document.getElementById('ts').textContent='Updated '+new Date().toLocaleTimeString();
