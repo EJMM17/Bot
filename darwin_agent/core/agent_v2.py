@@ -266,6 +266,7 @@ class DarwinAgentV2:
             self.logger.error(f"Cannot get positions: {e}")
             return
 
+        closed_any = False
         for pos in positions:
             try:
                 price = await adapter.get_current_price(pos.symbol)
@@ -290,8 +291,18 @@ class DarwinAgentV2:
                     result = await adapter.close_position(pos)
                     if result.success:
                         self._process_result(pos.pnl, pos.pnl_pct, pos.symbol)
+                        closed_any = True
             except Exception as e:
                 self.logger.error(f"Position mgmt {pos.symbol}: {e}")
+
+        # Sync health capital with actual adapter balance (includes fees)
+        if closed_any:
+            try:
+                balance = await adapter.get_balance()
+                if balance > 0:
+                    self.health.update_capital(balance)
+            except Exception:
+                pass
 
     async def _incubation_cycle(self):
         adapter = list(self.markets.values())[0]
@@ -409,7 +420,8 @@ class DarwinAgentV2:
     def _process_result(self, pnl, pnl_pct, symbol):
         old_hp = self.health.current_hp
         self.health.record_trade(pnl, pnl_pct)
-        self.health.update_capital(self.health.current_capital + pnl)
+        # Capital sync is done in _manage_positions with actual adapter balance
+        # (accounts for trading fees that raw PnL ignores)
         hp_change = self.health.current_hp - old_hp
         self.selector.report_result(pnl_pct, hp_change)
         self.risk.record_trade_result(pnl, self.health.current_capital)

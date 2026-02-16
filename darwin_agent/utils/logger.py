@@ -3,7 +3,7 @@
 import logging
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 
@@ -27,7 +27,7 @@ class DarwinLogger:
         ch.setFormatter(fmt)
         self.logger.addHandler(ch)
 
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         fh = logging.FileHandler(f"{self.log_dir}/gen_{generation}_{ts}.log")
         fh.setLevel(logging.DEBUG)
         fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
@@ -44,7 +44,7 @@ class DarwinLogger:
     def trade(self, action: str, market: str, symbol: str, amount: float,
               price: float, reason: str, result: Optional[dict] = None):
         entry = {
-            "ts": datetime.now().isoformat(),
+            "ts": datetime.now(timezone.utc).isoformat(),
             "gen": self.generation,
             "action": action,
             "market": market,

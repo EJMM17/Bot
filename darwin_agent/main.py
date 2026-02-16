@@ -68,11 +68,13 @@ async def run_forever(config: AgentConfig, mode: str = "test"):
         print(f"  ⚠️  Dashboard failed: {e}")
 
     for attempt in range(100):
+        agent = spawn(config, mode)
+        agent_gen = agent.generation
+
         print(f"\n{'=' * 55}")
-        print(f"  🐣 Spawning Generation {gen + attempt}")
+        print(f"  🐣 Spawning Generation {agent_gen}")
         print(f"{'=' * 55}\n")
 
-        agent = spawn(config, mode)
         set_agent(agent)
 
         try:
@@ -82,7 +84,7 @@ async def run_forever(config: AgentConfig, mode: str = "test"):
 
         status = agent.get_status()
         if status["health"]["hp"] <= 0:
-            print(f"\n💀 Gen-{gen + attempt} dead: {status['health']['cause_of_death']}")
+            print(f"\n💀 Gen-{agent_gen} dead: {status['health']['cause_of_death']}")
             print(f"   Final: ${status['health']['capital']:.2f}")
 
             if status["health"]["capital"] <= 0:

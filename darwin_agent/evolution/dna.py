@@ -2,7 +2,7 @@
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Optional, Any
 from collections import Counter
@@ -141,11 +141,11 @@ class EvolutionEngine:
     def synthesize_inherited_dna(self, max_gens=50) -> DNA:
         all_dna = self.load_all_dna()
         if not all_dna:
-            return DNA(generation=0, born_at=datetime.now().isoformat())
+            return DNA(generation=0, born_at=datetime.now(timezone.utc).isoformat())
 
         recent = all_dna[-max_gens:]
         new_gen = recent[-1].generation + 1
-        inherited = DNA(generation=new_gen, born_at=datetime.now().isoformat())
+        inherited = DNA(generation=new_gen, born_at=datetime.now(timezone.utc).isoformat())
 
         agg: Dict[str, Dict] = {}
         for d in recent:

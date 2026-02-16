@@ -38,7 +38,7 @@ class RiskConfig:
 
 @dataclass
 class EvolutionConfig:
-    incubation_candles: int = 300
+    incubation_candles: int = 200
     min_graduation_winrate: float = 0.52
     dna_path: str = "data/generations"
     max_generations_memory: int = 50
