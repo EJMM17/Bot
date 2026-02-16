@@ -254,8 +254,50 @@ class DarwinAgentV2:
             self.logger.error(f"Cycle error (non-fatal): {e}")
             # Don't crash the agent for a single cycle failure
 
+    async def _manage_positions(self, adapter):
+        """Check open positions for SL/TP hits and close them.
+
+        Used by both incubation and live cycles. Paper trading positions
+        have no server-side SL/TP so we must check locally.
+        """
+        try:
+            positions = await adapter.get_open_positions()
+        except Exception as e:
+            self.logger.error(f"Cannot get positions: {e}")
+            return
+
+        for pos in positions:
+            try:
+                price = await adapter.get_current_price(pos.symbol)
+                if price <= 0:
+                    continue
+                pos.update_pnl(price)
+
+                if pos.has_server_sltp:
+                    continue
+
+                close = False
+                if pos.stop_loss:
+                    if (pos.side == OrderSide.BUY and price <= pos.stop_loss) or \
+                       (pos.side == OrderSide.SELL and price >= pos.stop_loss):
+                        close = True
+                if pos.take_profit:
+                    if (pos.side == OrderSide.BUY and price >= pos.take_profit) or \
+                       (pos.side == OrderSide.SELL and price <= pos.take_profit):
+                        close = True
+
+                if close:
+                    result = await adapter.close_position(pos)
+                    if result.success:
+                        self._process_result(pos.pnl, pos.pnl_pct, pos.symbol)
+            except Exception as e:
+                self.logger.error(f"Position mgmt {pos.symbol}: {e}")
+
     async def _incubation_cycle(self):
         adapter = list(self.markets.values())[0]
+
+        # Manage existing positions — check SL/TP and close if hit
+        await self._manage_positions(adapter)
 
         for symbol in self.watchlist:
             if not self.health.is_alive:
@@ -301,41 +343,8 @@ class DarwinAgentV2:
     async def _live_cycle(self):
         adapter = list(self.markets.values())[0]
 
-        # 1. Manage existing positions
-        try:
-            positions = await adapter.get_open_positions()
-        except Exception as e:
-            self.logger.error(f"Cannot get positions: {e}")
-            return
-
-        for pos in positions:
-            try:
-                price = await adapter.get_current_price(pos.symbol)
-                if price <= 0:
-                    continue
-                pos.update_pnl(price)
-
-                # Bybit handles SL/TP server-side — don't race with it
-                # Only do local check for paper trading (no server-side SL/TP)
-                if pos.has_server_sltp:
-                    continue
-
-                close = False
-                if pos.stop_loss:
-                    if (pos.side == OrderSide.BUY and price <= pos.stop_loss) or \
-                       (pos.side == OrderSide.SELL and price >= pos.stop_loss):
-                        close = True
-                if pos.take_profit:
-                    if (pos.side == OrderSide.BUY and price >= pos.take_profit) or \
-                       (pos.side == OrderSide.SELL and price <= pos.take_profit):
-                        close = True
-
-                if close:
-                    result = await adapter.close_position(pos)
-                    if result.success:
-                        self._process_result(pos.pnl, pos.pnl_pct, pos.symbol)
-            except Exception as e:
-                self.logger.error(f"Position mgmt {pos.symbol}: {e}")
+        # 1. Manage existing positions (check SL/TP, close if hit)
+        await self._manage_positions(adapter)
 
         # 2. Scan for new trades
         for symbol in self.watchlist:
