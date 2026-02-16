@@ -1,0 +1,4 @@
+# Darwin Agent v2.3 Dependencies
+aiohttp>=3.9.0          # Async HTTP for market APIs + web dashboard
+pyyaml>=6.0             # Configuration files
+numpy>=1.24.0           # ML brain computations + feature engineering
