@@ -1,4 +1,10 @@
-"""Feature Engineering — Converts candles into a 30-dim ML feature vector."""
+"""Feature Engineering — Converts candles into a 30-dim ML feature vector.
+
+AI enhancements:
+- Adaptive regime detection with online threshold learning
+- Better normalization for EMA distances and ROC
+- OBV magnitude preserved (not just sign)
+"""
 
 import numpy as np
 from typing import List, Dict, Optional, Tuple
@@ -39,6 +45,17 @@ class MarketFeatures:
 
 class FeatureEngineer:
 
+    def __init__(self):
+        # Adaptive regime thresholds: updated online as agent sees more data
+        self._regime_trend_threshold = 0.6
+        self._regime_vol_high = 2.0
+        self._regime_vol_very_high = 3.0
+        self._regime_vol_low = 1.5
+        # Exponential moving averages for adaptive thresholds
+        self._ema_trend = 0.5
+        self._ema_vol = 2.0
+        self._regime_samples = 0
+
     def extract(self, candles: List[Candle], symbol: str) -> Optional[MarketFeatures]:
         if len(candles) < 50:
             return None
@@ -60,9 +77,10 @@ class FeatureEngineer:
         ema21 = self._ema(closes, 21)
         ema50 = self._ema(closes, min(50, len(closes) - 1))
 
-        f["trend_ema9_dist"] = (price - ema9[-1]) / atr_val if len(ema9) > 0 and atr_val > 0 else 0
-        f["trend_ema21_dist"] = (price - ema21[-1]) / atr_val if len(ema21) > 0 and atr_val > 0 else 0
-        f["trend_ema50_dist"] = (price - ema50[-1]) / atr_val if len(ema50) > 0 and atr_val > 0 else 0
+        # FIX: Normalize EMA distance by price (percentage), not ATR
+        f["trend_ema9_dist"] = (price - ema9[-1]) / price * 100 if len(ema9) > 0 and price > 0 else 0
+        f["trend_ema21_dist"] = (price - ema21[-1]) / price * 100 if len(ema21) > 0 and price > 0 else 0
+        f["trend_ema50_dist"] = (price - ema50[-1]) / price * 100 if len(ema50) > 0 and price > 0 else 0
 
         alignment = 0.0
         if len(ema9) > 0 and len(ema21) > 0 and len(ema50) > 0:
@@ -94,9 +112,16 @@ class FeatureEngineer:
         else:
             f["momentum_rsi_divergence"] = 0.0
 
-        f["momentum_roc_5"] = (closes[-1] / closes[-5] - 1) * 100 if len(closes) >= 5 and closes[-5] > 0 else 0
-        f["momentum_roc_10"] = (closes[-1] / closes[-10] - 1) * 100 if len(closes) >= 10 and closes[-10] > 0 else 0
-        f["momentum_roc_20"] = (closes[-1] / closes[-20] - 1) * 100 if len(closes) >= 20 and closes[-20] > 0 else 0
+        # FIX: ROC with tanh normalization to handle extreme values
+        def safe_roc(c, n):
+            if len(c) >= n and c[-n] > 0:
+                raw = (c[-1] / c[-n] - 1) * 100
+                return float(np.tanh(raw / 5))  # Soft clip to [-1, 1]
+            return 0.0
+
+        f["momentum_roc_5"] = safe_roc(closes, 5)
+        f["momentum_roc_10"] = safe_roc(closes, 10)
+        f["momentum_roc_20"] = safe_roc(closes, 20)
 
         ema12 = self._ema(closes, 12)
         ema26 = self._ema(closes, 26)
@@ -133,9 +158,13 @@ class FeatureEngineer:
         else:
             f["volume_price_corr"] = 0
 
+        # FIX: OBV slope preserves magnitude (not just sign)
         obv = np.where(np.diff(closes[-20:]) > 0, volumes[-19:], -volumes[-19:])
         if len(obv) > 1:
-            f["volume_obv_slope"] = float(np.sign(np.polyfit(np.arange(len(obv)), np.cumsum(obv), 1)[0]))
+            cumobv = np.cumsum(obv)
+            slope_val = np.polyfit(np.arange(len(cumobv)), cumobv, 1)[0]
+            # Normalize by average volume to get comparable values across symbols
+            f["volume_obv_slope"] = float(np.tanh(slope_val / max(avg_vol, 1)))
         else:
             f["volume_obv_slope"] = 0
 
@@ -177,15 +206,30 @@ class FeatureEngineer:
         )
 
     def _detect_regime(self, f: Dict[str, float]) -> str:
+        """Adaptive regime detection with online threshold learning."""
         trend = abs(f.get("trend_alignment", 0))
         vol = f.get("vol_bb_width", 0)
-        if trend > 0.6 and vol > 2:
+
+        # Update adaptive thresholds via exponential moving average
+        alpha = 0.01  # Slow adaptation
+        self._ema_trend = self._ema_trend * (1 - alpha) + trend * alpha
+        self._ema_vol = self._ema_vol * (1 - alpha) + vol * alpha
+        self._regime_samples += 1
+
+        # After enough samples, start adapting thresholds
+        if self._regime_samples > 100:
+            self._regime_trend_threshold = max(0.3, min(0.8, self._ema_trend * 1.2))
+            self._regime_vol_high = max(1.0, min(4.0, self._ema_vol * 1.0))
+            self._regime_vol_very_high = self._regime_vol_high * 1.5
+            self._regime_vol_low = self._regime_vol_high * 0.75
+
+        if trend > self._regime_trend_threshold and vol > self._regime_vol_high:
             return "trending_volatile"
-        if trend > 0.6:
+        if trend > self._regime_trend_threshold:
             return "trending_calm"
-        if vol > 3:
+        if vol > self._regime_vol_very_high:
             return "choppy"
-        if vol < 1.5:
+        if vol < self._regime_vol_low:
             return "ranging_tight"
         return "ranging_normal"
 

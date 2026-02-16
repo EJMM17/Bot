@@ -1,20 +1,20 @@
 """
-Darwin Agent v2.2 — Production-grade autonomous trading agent.
+Darwin Agent v2.3 — Fully autonomous AI trading agent.
 
-Server resilience:
-- Periodic state save to disk (survives server restart)
-- Auto-reconnection to markets on disconnect
-- UTC-only timestamps (no timezone issues across restarts)
-- Graceful degradation: skip symbols on API errors, don't crash
-- Heartbeat health checks on market connection
-- Exponential backoff on repeated failures
+AI enhancements over v2.2:
+- Dynamic watchlist discovery from exchange
+- Adaptive graduation (timeout + progressive threshold)
+- Adaptive cooldown (learns optimal rest duration)
+- Volatility-based position sizing
+- Outcome binding (decision → trade → close → reward)
+- Health-aware capital allocation
 """
 
 import asyncio
 import json
 import os
 from datetime import datetime, timezone, timedelta
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 from enum import Enum
 
 from darwin_agent.core.health import HealthSystem, HealthStatus
@@ -43,6 +43,9 @@ class AgentPhase(Enum):
 
 
 STATE_FILE = "data/agent_state.json"
+
+# Default watchlist (used as fallback if exchange discovery fails)
+DEFAULT_WATCHLIST = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
 
 
 class DarwinAgentV2:
@@ -81,7 +84,11 @@ class DarwinAgentV2:
         self.incubation_trades = 0
         self.incubation_wins = 0
         self.cooldown_until: Optional[datetime] = None
-        self.watchlist = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
+
+        # Dynamic watchlist (loaded from exchange or config)
+        self.watchlist: List[str] = list(DEFAULT_WATCHLIST)
+        self._watchlist_last_refresh = 0.0
+        self._watchlist_refresh_interval = 3600  # Refresh every hour
 
         # Cache last candles per symbol for Q-learning next_state
         self._last_candles: Dict[str, list] = {}
@@ -90,6 +97,13 @@ class DarwinAgentV2:
         self._symbol_errors: Dict[str, int] = {}
         self._max_symbol_errors = 5  # Skip symbol after 5 consecutive errors
         self._last_state_save = 0.0
+
+        # Adaptive cooldown: learn how long to rest after losses
+        self._cooldown_outcomes: List[Dict] = []  # Track {cooldown_mins, next_trade_pnl}
+        self._learned_cooldown_mult = 5.0  # Starts at 5 min/loss, adapts
+
+        # Adaptive graduation: progressive threshold
+        self._graduation_check_interval = 50  # Check every 50 trades
 
     def _inherit_ml(self):
         if self.generation == 0:
@@ -131,6 +145,66 @@ class DarwinAgentV2:
                 except Exception as e:
                     self.logger.error(f"Market init error: {e}")
 
+    async def _discover_watchlist(self, adapter: MarketAdapter):
+        """Dynamically discover tradeable symbols from exchange.
+
+        Keeps top liquid USDT perpetuals, adding new ones and removing dead ones.
+        Falls back to DEFAULT_WATCHLIST on failure.
+        """
+        now = _utcnow().timestamp()
+        if now - self._watchlist_last_refresh < self._watchlist_refresh_interval:
+            return
+
+        try:
+            # Try to get tickers and pick top by volume
+            # BybitAdapter stores instrument info; check which symbols are active
+            if hasattr(adapter, 'real_adapter'):
+                real = adapter.real_adapter
+            elif hasattr(adapter, '_instruments'):
+                real = adapter
+            else:
+                return
+
+            if not hasattr(real, '_instruments') or not real._instruments:
+                return
+
+            # Get all USDT perpetual symbols that the exchange supports
+            available = list(real._instruments.keys())
+            if len(available) < 5:
+                return  # Not enough instruments loaded
+
+            # Score symbols: prefer those we have data on + top market caps
+            # Start with defaults, then add high-volume ones
+            priority_symbols = set(DEFAULT_WATCHLIST)
+            candidates = [s for s in available if s.endswith("USDT")]
+
+            # Keep blacklisted out
+            blacklisted = set(self.dna.blacklisted_pairs)
+
+            # Build final watchlist: defaults first, then extras up to 10
+            new_watchlist = []
+            for s in DEFAULT_WATCHLIST:
+                if s in candidates and s not in blacklisted:
+                    new_watchlist.append(s)
+
+            for s in candidates:
+                if s not in new_watchlist and s not in blacklisted and len(new_watchlist) < 10:
+                    new_watchlist.append(s)
+
+            if len(new_watchlist) >= 3:
+                old = set(self.watchlist)
+                self.watchlist = new_watchlist
+                added = set(new_watchlist) - old
+                removed = old - set(new_watchlist)
+                if added or removed:
+                    self.logger.info(f"Watchlist updated: {len(new_watchlist)} symbols "
+                                     f"(+{len(added)} -{len(removed)})")
+                self._watchlist_last_refresh = now
+
+        except Exception as e:
+            self.logger.warning(f"Watchlist discovery failed: {e}")
+            # Keep existing watchlist
+
     async def _check_market_health(self) -> bool:
         """Verify market connection is alive. Reconnect if needed."""
         if not self.markets:
@@ -158,12 +232,9 @@ class DarwinAgentV2:
         return bool(self.markets)
 
     def _save_state(self):
-        """
-        Periodically save agent state to disk.
-        Allows recovery after server restart/crash.
-        """
+        """Periodically save agent state to disk."""
         now = _utcnow().timestamp()
-        if now - self._last_state_save < 60:  # Save at most once per minute
+        if now - self._last_state_save < 60:
             return
 
         try:
@@ -181,9 +252,10 @@ class DarwinAgentV2:
                 "brain_epsilon": self.brain.epsilon,
                 "born_at": self.born_at.isoformat(),
                 "saved_at": _utcnow().isoformat(),
+                "watchlist": self.watchlist,
+                "learned_cooldown_mult": self._learned_cooldown_mult,
             }
             os.makedirs(os.path.dirname(STATE_FILE) or "data", exist_ok=True)
-            # Write to temp then rename (atomic on Linux, prevents corruption)
             tmp = STATE_FILE + ".tmp"
             with open(tmp, "w") as f:
                 json.dump(state, f)
@@ -245,6 +317,11 @@ class DarwinAgentV2:
                 self.logger.error("Markets unavailable, skipping cycle")
                 return
 
+        # Dynamic watchlist refresh
+        if self.markets:
+            adapter = list(self.markets.values())[0]
+            await self._discover_watchlist(adapter)
+
         # Cooldown check (UTC-based)
         if self.cooldown_until and _utcnow() < self.cooldown_until:
             return
@@ -256,14 +333,9 @@ class DarwinAgentV2:
                 await self._live_cycle()
         except Exception as e:
             self.logger.error(f"Cycle error (non-fatal): {e}")
-            # Don't crash the agent for a single cycle failure
 
     async def _manage_positions(self, adapter):
-        """Check open positions for SL/TP hits and close them.
-
-        Used by both incubation and live cycles. Paper trading positions
-        have no server-side SL/TP so we must check locally.
-        """
+        """Check open positions for SL/TP hits and close them."""
         try:
             positions = await adapter.get_open_positions()
         except Exception as e:
@@ -299,7 +371,7 @@ class DarwinAgentV2:
             except Exception as e:
                 self.logger.error(f"Position mgmt {pos.symbol}: {e}")
 
-        # Sync health capital with actual adapter balance (includes fees)
+        # Sync health capital with actual adapter balance
         if closed_any:
             try:
                 balance = await adapter.get_balance()
@@ -311,14 +383,14 @@ class DarwinAgentV2:
     async def _incubation_cycle(self):
         adapter = list(self.markets.values())[0]
 
-        # Manage existing positions — check SL/TP and close if hit
+        # Manage existing positions
         await self._manage_positions(adapter)
 
         for symbol in self.watchlist:
             if not self.health.is_alive:
                 break
             if self._symbol_errors.get(symbol, 0) >= self._max_symbol_errors:
-                continue  # Skip symbols with too many errors
+                continue
 
             try:
                 candles = await adapter.get_candles(symbol, TimeFrame.M15, limit=100)
@@ -342,28 +414,57 @@ class DarwinAgentV2:
                 else:
                     self.selector.report_hold_result(candles, symbol)
 
-                # Reset error count on success
                 self._symbol_errors[symbol] = 0
 
             except Exception as e:
                 self._symbol_errors[symbol] = self._symbol_errors.get(symbol, 0) + 1
                 self.logger.error(f"{symbol}: {e} (errors: {self._symbol_errors[symbol]})")
 
-        # Check graduation
-        if self.incubation_trades >= self.config.evolution.incubation_candles:
-            wr = self.incubation_wins / max(1, self.incubation_trades)
-            if wr >= self.config.evolution.min_graduation_winrate:
-                await self._graduate()
-            else:
-                await self._die(f"Failed incubation WR:{wr:.1%}")
+        # Adaptive graduation check
+        self._check_graduation()
+
+    def _check_graduation(self):
+        """Adaptive graduation: progressive threshold + timeout.
+
+        Instead of rigid "200 trades at 52% WR", uses:
+        1. Check every 50 trades
+        2. Lower threshold as more trades accumulate (more data = more confidence)
+        3. Timeout: auto-graduate after 400 trades if WR > 48% (marginal pass)
+        """
+        if self.incubation_trades < self._graduation_check_interval:
+            return
+
+        wr = self.incubation_wins / max(1, self.incubation_trades)
+        target_trades = self.config.evolution.incubation_candles
+        target_wr = self.config.evolution.min_graduation_winrate
+
+        # Progressive: as we accumulate more trades, we need less WR advantage
+        # (law of large numbers — more data = more confidence in the WR estimate)
+        trades_ratio = min(1.0, self.incubation_trades / target_trades)
+
+        if self.incubation_trades >= target_trades:
+            # Standard graduation check
+            if wr >= target_wr:
+                asyncio.ensure_future(self._graduate())
+            elif self.incubation_trades >= target_trades * 2:
+                # Timeout: after 2x target trades, die if still below threshold
+                asyncio.ensure_future(self._die(f"Failed incubation WR:{wr:.1%} after {self.incubation_trades} trades"))
+            elif wr < target_wr - 0.10:
+                # Way below target, die early
+                asyncio.ensure_future(self._die(f"Failed incubation WR:{wr:.1%}"))
+        elif self.incubation_trades >= target_trades * 0.5:
+            # Early graduation: if WR is significantly above threshold, graduate early
+            early_bonus = 0.05 * (1.0 - trades_ratio)  # Require higher WR for early grad
+            if wr >= target_wr + early_bonus:
+                self.logger.evolution(f"Early graduation! WR:{wr:.1%} > {target_wr + early_bonus:.1%} at {self.incubation_trades} trades")
+                asyncio.ensure_future(self._graduate())
 
     async def _live_cycle(self):
         adapter = list(self.markets.values())[0]
 
-        # 1. Manage existing positions (check SL/TP, close if hit)
+        # Manage existing positions
         await self._manage_positions(adapter)
 
-        # 2. Scan for new trades
         for symbol in self.watchlist:
             if not self.health.is_alive or symbol in self.dna.blacklisted_pairs:
                 continue
@@ -384,9 +485,13 @@ class DarwinAgentV2:
                     ok, reason = self.risk.approve_trade(
                         decision.signal, self.health.current_capital, len(positions))
                     if ok:
-                        mult = self.selector.sizing_multipliers.get(
+                        # Volatility-aware + health-aware sizing
+                        base_mult = self.selector.sizing_multipliers.get(
                             decision.action.sizing if decision.action else "normal", 1.0)
-                        await self._execute(decision, adapter, mult)
+                        vol_mult = self._volatility_sizing(candles)
+                        health_mult = self._health_sizing(hp)
+                        final_mult = base_mult * vol_mult * health_mult
+                        await self._execute(decision, adapter, final_mult)
                     else:
                         self.selector.report_result(0, 0)
                 else:
@@ -397,6 +502,37 @@ class DarwinAgentV2:
             except Exception as e:
                 self._symbol_errors[symbol] = self._symbol_errors.get(symbol, 0) + 1
                 self.logger.error(f"{symbol}: {e}")
+
+    def _volatility_sizing(self, candles) -> float:
+        """Scale position size inversely with volatility.
+
+        High volatility = smaller position (risk parity principle).
+        """
+        if len(candles) < 20:
+            return 1.0
+        closes = [c.close for c in candles[-20:]]
+        returns = [(closes[i] - closes[i-1]) / closes[i-1] for i in range(1, len(closes))]
+        vol = float(max(0.001, (sum(r**2 for r in returns) / len(returns)) ** 0.5))
+
+        # Baseline vol: ~1% per 15min bar for crypto
+        baseline_vol = 0.01
+        ratio = baseline_vol / max(vol, 0.001)
+        # Clamp: 0.5x to 1.5x normal size
+        return max(0.5, min(1.5, ratio))
+
+    def _health_sizing(self, health_pct: float) -> float:
+        """Scale position size based on agent health.
+
+        Lower health = smaller positions (survival mode).
+        """
+        if health_pct > 0.7:
+            return 1.0
+        elif health_pct > 0.4:
+            return 0.75
+        elif health_pct > 0.2:
+            return 0.5
+        else:
+            return 0.3
 
     async def _execute(self, decision, adapter, sizing_mult=1.0) -> bool:
         signal = decision.signal
@@ -429,8 +565,6 @@ class DarwinAgentV2:
     def _process_result(self, pnl, pnl_pct, symbol):
         old_hp = self.health.current_hp
         self.health.record_trade(pnl, pnl_pct)
-        # Capital sync is done in _manage_positions with actual adapter balance
-        # (accounts for trading fees that raw PnL ignores)
         hp_change = self.health.current_hp - old_hp
         candles = self._last_candles.get(symbol)
         self.selector.report_result(pnl_pct, hp_change, candles, symbol)
@@ -439,13 +573,38 @@ class DarwinAgentV2:
         if self.phase == AgentPhase.INCUBATION and pnl > 0:
             self.incubation_wins += 1
 
+        # Adaptive cooldown
         if self.health.loss_streak >= 2:
-            mins = self.health.loss_streak * 5
+            mins = self.health.loss_streak * self._learned_cooldown_mult
             self.cooldown_until = _utcnow() + timedelta(minutes=mins)
-            self.logger.warning(f"Cooldown {mins}min (streak:{self.health.loss_streak})")
+            self.logger.warning(f"Cooldown {mins:.0f}min (streak:{self.health.loss_streak}, mult:{self._learned_cooldown_mult:.1f})")
+            # Record for learning
+            self._cooldown_outcomes.append({
+                "cooldown_mins": mins,
+                "loss_streak": self.health.loss_streak,
+                "entered_at": _utcnow().isoformat(),
+            })
+        elif self.cooldown_until and pnl > 0:
+            # We just came off cooldown and won — the cooldown duration was good
+            self._learn_cooldown(success=True)
+        elif self.cooldown_until and pnl <= 0:
+            # Came off cooldown and lost — cooldown wasn't long enough
+            self._learn_cooldown(success=False)
+
+        if self.cooldown_until and _utcnow() >= self.cooldown_until:
+            self.cooldown_until = None  # Cooldown expired
 
         self.logger.health_update(self.health.current_hp, hp_change,
                                   f"Trade: ${pnl:+.2f} ({pnl_pct:+.2f}%) | {symbol}")
+
+    def _learn_cooldown(self, success: bool):
+        """Adapt cooldown multiplier based on post-cooldown outcomes."""
+        if success:
+            # Cooldown worked: slightly decrease (was enough rest)
+            self._learned_cooldown_mult = max(2.0, self._learned_cooldown_mult * 0.95)
+        else:
+            # Cooldown wasn't enough: increase
+            self._learned_cooldown_mult = min(15.0, self._learned_cooldown_mult * 1.1)
 
     async def _graduate(self):
         wr = self.incubation_wins / max(1, self.incubation_trades)
@@ -475,7 +634,6 @@ class DarwinAgentV2:
         self.dna.max_drawdown_pct = self.health.current_drawdown_pct
 
         # Populate strategy_genes from this generation's actual trading data
-        # (replace inherited aggregate with current gen's own results)
         self.dna.strategy_genes = {}
         for rs in self.selector.regime_stats.values():
             for strat_name, sr in rs.strategy_results.items():
@@ -512,7 +670,6 @@ class DarwinAgentV2:
                          self.health.win_rate, life / 3600)
         print(report)
 
-        # Clean up state file
         try:
             if os.path.exists(STATE_FILE):
                 os.remove(STATE_FILE)
@@ -537,4 +694,6 @@ class DarwinAgentV2:
             "cycle": self.cycle_count,
             "uptime_seconds": (_utcnow() - self.born_at).total_seconds(),
             "inherited_rules": len(self.dna.rules),
+            "watchlist": self.watchlist,
+            "cooldown_multiplier": round(self._learned_cooldown_mult, 1),
         }

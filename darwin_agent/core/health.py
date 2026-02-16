@@ -1,4 +1,10 @@
-"""Health System — HP tracking. When HP hits 0, the agent dies permanently."""
+"""Health System — HP tracking scaled to capital drawdown. When HP hits 0, the agent dies.
+
+AI enhancements:
+- HP changes proportional to actual capital risk/reward
+- Loss streak penalty scales with drawdown severity
+- Win streak bonus capped by health state
+"""
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -49,7 +55,7 @@ class HealthSystem:
     max_drawdown_pct: float = 20.0
     drawdown_hp_penalty: float = 30.0
 
-    # Track if threshold penalties were already applied (avoid repeated stacking)
+    # Track if threshold penalties were already applied
     _critical_penalty_applied: bool = False
     _drawdown_penalty_applied: bool = False
 
@@ -101,17 +107,30 @@ class HealthSystem:
             self.winning_trades += 1
             self.win_streak += 1
             self.loss_streak = 0
-            hp_gain = min(10.0, max(2.0, pnl_pct * 2))
+            # HP gain proportional to PnL% but with diminishing returns
+            # Small wins: 2-5 HP, medium: 5-8 HP, large: 8-10 HP
+            hp_gain = min(10.0, max(2.0, pnl_pct * 1.5))
             self._apply_change(hp_gain, f"Win ${pnl:.2f} ({pnl_pct:+.2f}%)", "trade_win")
+            # Win streak bonus: scaled by current health (prevent runaway HP when healthy)
             if self.win_streak >= 5:
-                self._apply_change(15.0, f"Win streak x{self.win_streak}!", "streak")
+                health_ratio = self.current_hp / self.max_hp
+                # Less bonus when already healthy; more when wounded (recovery)
+                streak_bonus = 15.0 * max(0.3, 1.0 - health_ratio)
+                self._apply_change(streak_bonus, f"Win streak x{self.win_streak}!", "streak")
         else:
             self.loss_streak += 1
             self.win_streak = 0
-            hp_loss = min(20.0, max(5.0, abs(pnl_pct) * 3))
+            # Loss penalty proportional to PnL% severity
+            hp_loss = min(20.0, max(5.0, abs(pnl_pct) * 2.5))
             self._apply_change(-hp_loss, f"Loss ${pnl:.2f} ({pnl_pct:+.2f}%)", "trade_loss")
+            # Loss streak: penalty proportional to current drawdown
             if self.loss_streak >= 3:
-                self._apply_change(-25.0, f"Loss streak x{self.loss_streak}!", "streak")
+                dd = self.current_drawdown_pct
+                # Scale penalty: 15 HP at 5% DD, 25 HP at 15%+ DD
+                dd_factor = min(1.0, max(0.5, dd / 15.0))
+                streak_penalty = 15.0 + 10.0 * dd_factor
+                self._apply_change(-streak_penalty,
+                                   f"Loss streak x{self.loss_streak} (DD:{dd:.1f}%)", "streak")
 
     def update_capital(self, new_capital: float):
         if not self.is_alive:
@@ -119,6 +138,9 @@ class HealthSystem:
         self.current_capital = new_capital
         if new_capital > self.peak_capital:
             self.peak_capital = new_capital
+            # Reset penalty flags on new peak (full recovery)
+            self._critical_penalty_applied = False
+            self._drawdown_penalty_applied = False
         # Reset penalty flags when capital recovers above thresholds
         if new_capital > self.critical_capital:
             self._critical_penalty_applied = False

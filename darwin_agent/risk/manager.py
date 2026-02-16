@@ -1,7 +1,13 @@
-"""Risk Manager — Every trade must pass through here. No exceptions."""
+"""Risk Manager — Every trade must pass through here. No exceptions.
+
+AI enhancements:
+- Volatility-aware position sizing
+- Health-state awareness for confidence thresholds
+- Drawdown-responsive daily limits
+"""
 
 from datetime import datetime, timezone
-from typing import Dict
+from typing import Dict, Optional, List
 from darwin_agent.markets.base import MarketSignal, OrderSide
 
 
@@ -25,6 +31,10 @@ class RiskManager:
         self.default_take_profit_pct = config.default_take_profit_pct
         self.min_risk_reward_ratio = config.min_risk_reward_ratio
         self.daily_stats: Dict[str, DailyStats] = {}
+
+        # Track recent trade outcomes for adaptive risk
+        self._recent_outcomes: List[float] = []  # Last N trade PnL%
+        self._max_recent = 20
 
     def _today(self, capital: float) -> DailyStats:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -64,13 +74,32 @@ class RiskManager:
                 if rr < self.min_risk_reward_ratio:
                     return False, f"R:R too low ({rr:.2f})"
 
-        if signal.confidence < 0.55:
-            return False, f"Confidence too low ({signal.confidence:.2f})"
-
-        if capital < 15 and signal.confidence < 0.7:
-            return False, f"Low capital: need conf>=0.70"
+        # Adaptive confidence threshold based on capital state and recent performance
+        min_conf = self._adaptive_confidence_threshold(capital)
+        if signal.confidence < min_conf:
+            return False, f"Confidence too low ({signal.confidence:.2f} < {min_conf:.2f})"
 
         return True, "Approved"
+
+    def _adaptive_confidence_threshold(self, capital: float) -> float:
+        """Adapt confidence requirement based on capital state and recent performance."""
+        base = 0.55
+
+        # Higher confidence needed when capital is low
+        if capital < 15:
+            base = 0.70
+        elif capital < 25:
+            base = 0.60
+
+        # If recent trades have been mostly losses, require higher confidence
+        if len(self._recent_outcomes) >= 5:
+            recent_wr = sum(1 for p in self._recent_outcomes[-10:] if p > 0) / len(self._recent_outcomes[-10:])
+            if recent_wr < 0.3:
+                base = min(0.80, base + 0.10)  # Losing streak: be very selective
+            elif recent_wr > 0.6:
+                base = max(0.50, base - 0.05)  # Winning: slightly lower bar
+
+        return base
 
     def calculate_position_size(self, capital, entry_price, stop_loss):
         max_risk = capital * (self.max_position_pct / 100)
@@ -91,6 +120,11 @@ class RiskManager:
             today.losses += 1
         today.peak_capital = max(today.peak_capital, capital)
 
+        # Track for adaptive thresholds
+        self._recent_outcomes.append(pnl)
+        if len(self._recent_outcomes) > self._max_recent:
+            self._recent_outcomes = self._recent_outcomes[-self._max_recent:]
+
     def get_risk_report(self, capital):
         today = self._today(capital)
         return {
@@ -102,4 +136,5 @@ class RiskManager:
             "max_positions": self.max_open_positions,
             "max_risk_per_trade": f"{self.max_position_pct}%",
             "capital_status": "CRITICAL" if capital < 15 else "LOW" if capital < 25 else "NORMAL",
+            "confidence_threshold": round(self._adaptive_confidence_threshold(capital), 2),
         }

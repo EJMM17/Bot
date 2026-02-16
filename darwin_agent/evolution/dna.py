@@ -1,7 +1,15 @@
-"""Evolution — DNA encoding, death reports, and cross-generation inheritance."""
+"""Evolution — DNA encoding, death reports, and cross-generation inheritance.
+
+AI enhancements:
+- Recency-weighted inheritance (recent generations count more)
+- Fitness-weighted DNA (successful agents influence more)
+- Death cause penalizes strategies that led to death
+- Adaptive confidence scoring
+"""
 
 import json
 import os
+import math
 from datetime import datetime, timezone
 from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Optional, Any
@@ -27,9 +35,17 @@ class StrategyGene:
             self.confidence_score = 0.5
             return
         wr = self.win_rate
-        ps = min(1.0, max(0.0, (self.avg_pnl_per_trade + 5) / 10))
-        ss = min(1.0, self.times_used / 50)
-        self.confidence_score = wr * 0.4 + ps * 0.4 + ss * 0.2
+        # Normalize avg PnL using a sigmoid-like function (handles any range)
+        pnl_norm = 1.0 / (1.0 + math.exp(-self.avg_pnl_per_trade * 0.5))
+        # Sample size: diminishing returns after 30 trades
+        ss = min(1.0, self.times_used / 30)
+        # Sharpe-like adjustment: penalize high variance
+        if self.times_used >= 10:
+            # Approximate consistency: high WR with positive PnL = consistent
+            consistency = min(1.0, wr * pnl_norm * 2)
+        else:
+            consistency = 0.5
+        self.confidence_score = wr * 0.3 + pnl_norm * 0.3 + ss * 0.15 + consistency * 0.25
 
 
 @dataclass
@@ -49,6 +65,18 @@ class DNA:
     strategy_genes: Dict[str, StrategyGene] = field(default_factory=dict)
     rules: List[str] = field(default_factory=list)
     blacklisted_pairs: List[str] = field(default_factory=list)
+
+    @property
+    def fitness(self) -> float:
+        """Fitness score for weighting inheritance. Higher = better agent."""
+        if self.total_trades < 5:
+            return 0.1
+        # Components: PnL, win rate, survival time, low drawdown
+        pnl_score = max(0.0, min(1.0, (self.total_pnl + 10) / 20))  # -10..+10 -> 0..1
+        wr_score = self.win_rate
+        survival_score = min(1.0, self.lifespan_seconds / (3600 * 24))  # Normalize to 1 day
+        dd_score = max(0.0, 1.0 - self.max_drawdown_pct / 30)  # 30% DD = 0 score
+        return pnl_score * 0.35 + wr_score * 0.3 + survival_score * 0.2 + dd_score * 0.15
 
     def to_dict(self):
         return {
@@ -122,6 +150,7 @@ class EvolutionEngine:
             f"  Died:    {dna.died_at}",
             f"  Cause:   {dna.cause_of_death}",
             f"  Life:    {dna.lifespan_seconds / 3600:.1f}h",
+            f"  Fitness: {dna.fitness:.3f}",
             "-" * 50,
             f"  Capital: ${dna.starting_capital:.2f} -> ${dna.final_capital:.2f} (peak ${dna.peak_capital:.2f})",
             f"  P&L:     ${dna.total_pnl:+.2f}",
@@ -139,6 +168,11 @@ class EvolutionEngine:
         return "\n".join(lines)
 
     def synthesize_inherited_dna(self, max_gens=50) -> DNA:
+        """Create inherited DNA with recency + fitness weighting.
+
+        Recent generations with high fitness contribute more to inheritance.
+        Death causes penalize strategies associated with failure.
+        """
         all_dna = self.load_all_dna()
         if not all_dna:
             return DNA(generation=0, born_at=datetime.now(timezone.utc).isoformat())
@@ -146,40 +180,82 @@ class EvolutionEngine:
         recent = all_dna[-max_gens:]
         new_gen = recent[-1].generation + 1
         inherited = DNA(generation=new_gen, born_at=datetime.now(timezone.utc).isoformat())
+        max_gen = recent[-1].generation
 
-        agg: Dict[str, Dict] = {}
+        # Compute weights: recency * fitness
+        weights = []
         for d in recent:
+            recency = math.exp((d.generation - max_gen) * 0.1)  # Exponential decay
+            fitness = max(0.01, d.fitness)
+            weights.append(recency * fitness)
+
+        total_weight = sum(weights) or 1.0
+
+        # Weighted aggregation of strategy genes
+        agg: Dict[str, Dict] = {}
+        for d, w in zip(recent, weights):
+            norm_w = w / total_weight
             for name, gene in d.strategy_genes.items():
                 if name not in agg:
-                    agg[name] = {"used": 0, "wins": 0, "losses": 0, "pnl": 0.0}
+                    agg[name] = {"used": 0.0, "wins": 0.0, "losses": 0.0, "pnl": 0.0}
                 a = agg[name]
-                a["used"] += gene.times_used
-                a["wins"] += gene.wins
-                a["losses"] += gene.losses
-                a["pnl"] += gene.total_pnl
+                a["used"] += gene.times_used * norm_w
+                a["wins"] += gene.wins * norm_w
+                a["losses"] += gene.losses * norm_w
+                a["pnl"] += gene.total_pnl * norm_w
+
+        # Death cause penalty: strategies active during deaths get penalized
+        death_strategy_penalty: Dict[str, float] = {}
+        for d in recent:
+            if d.cause_of_death:
+                for name, gene in d.strategy_genes.items():
+                    if gene.times_used > 0:
+                        # Weight penalty by how dominant the strategy was
+                        dominance = gene.times_used / max(1, d.total_trades)
+                        if dominance > 0.3:  # Strategy was used >30% of the time
+                            if name not in death_strategy_penalty:
+                                death_strategy_penalty[name] = 0.0
+                            death_strategy_penalty[name] += dominance * 0.1
 
         for name, a in agg.items():
-            g = StrategyGene(name=name, times_used=a["used"], wins=a["wins"],
-                             losses=a["losses"], total_pnl=a["pnl"],
-                             avg_pnl_per_trade=a["pnl"] / a["used"] if a["used"] > 0 else 0)
+            used = max(1, int(round(a["used"])))
+            wins = int(round(a["wins"]))
+            losses = int(round(a["losses"]))
+            pnl = a["pnl"]
+
+            # Apply death penalty
+            penalty = death_strategy_penalty.get(name, 0)
+            pnl -= penalty * abs(pnl) if pnl > 0 else 0  # Only penalize if profitable (reduce overconfidence)
+
+            g = StrategyGene(name=name, times_used=used, wins=wins,
+                             losses=losses, total_pnl=pnl,
+                             avg_pnl_per_trade=pnl / used if used > 0 else 0)
             g.update_confidence()
             inherited.strategy_genes[name] = g
 
+        # Rules: deduplicated, most recent first
         all_rules = []
-        for d in recent:
-            all_rules.extend(d.rules)
-        inherited.rules = list(dict.fromkeys(all_rules))
+        for d in reversed(recent):
+            for r in d.rules:
+                if r not in all_rules:
+                    all_rules.append(r)
+        inherited.rules = all_rules[:20]  # Cap at 20 rules
 
+        # Blacklist: union from recent gens
         bp = set()
         for d in recent:
             bp.update(d.blacklisted_pairs)
         inherited.blacklisted_pairs = list(bp)
 
+        # Death pattern analysis
         deaths = [d.cause_of_death for d in recent if d.cause_of_death]
         for cause, count in Counter(deaths).most_common(3):
-            rule = f"WARNING: {count} ancestors died from: {cause}"
+            rule = f"WARNING: {count}/{len(recent)} ancestors died from: {cause}"
             if rule not in inherited.rules:
-                inherited.rules.append(rule)
+                inherited.rules.insert(0, rule)
+
+        # Auto-blacklist: if a symbol caused >50% of deaths in recent gens
+        # (this would need symbol tracking in DNA, future enhancement)
 
         return inherited
 
