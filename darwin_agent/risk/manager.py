@@ -47,8 +47,8 @@ class RiskManager:
         if open_positions >= self.max_open_positions:
             return False, f"Max positions ({self.max_open_positions})"
 
-        if today.pnl < 0 and capital > 0:
-            loss_pct = abs(today.pnl) / capital * 100
+        if today.pnl < 0 and today.peak_capital > 0:
+            loss_pct = abs(today.pnl) / today.peak_capital * 100
             if loss_pct >= self.max_daily_loss_pct:
                 return False, f"Daily loss limit ({loss_pct:.1f}%)"
 
@@ -97,7 +97,7 @@ class RiskManager:
             "daily_trades": today.trades,
             "daily_limit": self.max_daily_trades,
             "daily_pnl": round(today.pnl, 2),
-            "daily_loss_pct": round(abs(today.pnl) / capital * 100, 2) if capital > 0 and today.pnl < 0 else 0,
+            "daily_loss_pct": round(abs(today.pnl) / today.peak_capital * 100, 2) if today.peak_capital > 0 and today.pnl < 0 else 0,
             "open_positions": 0,
             "max_positions": self.max_open_positions,
             "max_risk_per_trade": f"{self.max_position_pct}%",

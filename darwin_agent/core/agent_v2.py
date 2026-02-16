@@ -83,6 +83,9 @@ class DarwinAgentV2:
         self.cooldown_until: Optional[datetime] = None
         self.watchlist = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
 
+        # Cache last candles per symbol for Q-learning next_state
+        self._last_candles: Dict[str, list] = {}
+
         # Resilience: track consecutive market errors per symbol
         self._symbol_errors: Dict[str, int] = {}
         self._max_symbol_errors = 5  # Skip symbol after 5 consecutive errors
@@ -321,6 +324,7 @@ class DarwinAgentV2:
                 if not candles or len(candles) < 50:
                     continue
 
+                self._last_candles[symbol] = candles
                 hp = self.health.current_hp / self.health.max_hp
                 decision = self.selector.decide(candles, symbol, TimeFrame.M15, hp)
 
@@ -369,6 +373,7 @@ class DarwinAgentV2:
                 if not candles or len(candles) < 50:
                     continue
 
+                self._last_candles[symbol] = candles
                 hp = self.health.current_hp / self.health.max_hp
                 decision = self.selector.decide(candles, symbol, TimeFrame.M15, hp)
 
@@ -423,7 +428,8 @@ class DarwinAgentV2:
         # Capital sync is done in _manage_positions with actual adapter balance
         # (accounts for trading fees that raw PnL ignores)
         hp_change = self.health.current_hp - old_hp
-        self.selector.report_result(pnl_pct, hp_change)
+        candles = self._last_candles.get(symbol)
+        self.selector.report_result(pnl_pct, hp_change, candles, symbol)
         self.risk.record_trade_result(pnl, self.health.current_capital)
 
         if self.phase == AgentPhase.INCUBATION and pnl > 0:

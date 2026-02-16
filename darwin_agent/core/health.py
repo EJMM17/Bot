@@ -49,6 +49,10 @@ class HealthSystem:
     max_drawdown_pct: float = 20.0
     drawdown_hp_penalty: float = 30.0
 
+    # Track if threshold penalties were already applied (avoid repeated stacking)
+    _critical_penalty_applied: bool = False
+    _drawdown_penalty_applied: bool = False
+
     def get_status(self) -> HealthStatus:
         if not self.is_alive or self.current_hp <= 0:
             return HealthStatus.DEAD
@@ -115,13 +119,20 @@ class HealthSystem:
         self.current_capital = new_capital
         if new_capital > self.peak_capital:
             self.peak_capital = new_capital
+        # Reset penalty flags when capital recovers above thresholds
+        if new_capital > self.critical_capital:
+            self._critical_penalty_applied = False
+        if self.current_drawdown_pct < self.max_drawdown_pct:
+            self._drawdown_penalty_applied = False
         if new_capital <= self.instant_death_capital:
             self._apply_change(-999, f"Capital ${new_capital:.2f} below death line", "instant_death")
             return
-        if new_capital <= self.critical_capital:
+        if new_capital <= self.critical_capital and not self._critical_penalty_applied:
+            self._critical_penalty_applied = True
             self._apply_change(-self.critical_hp_penalty, f"Capital critical: ${new_capital:.2f}", "capital_warning")
         dd = self.current_drawdown_pct
-        if dd >= self.max_drawdown_pct:
+        if dd >= self.max_drawdown_pct and not self._drawdown_penalty_applied:
+            self._drawdown_penalty_applied = True
             self._apply_change(-self.drawdown_hp_penalty, f"Drawdown {dd:.1f}% exceeded limit", "drawdown")
 
     def get_vitals(self) -> dict:
