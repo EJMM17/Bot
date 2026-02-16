@@ -482,50 +482,59 @@ async def run_diagnostics(api_key: str, api_secret: str,
                     params={"accountType": "UNIFIED"},
                     headers=headers
                 ) as resp:
-                    data = await resp.json()
+                    data = await resp.json(content_type=None)
 
-                ret = data.get("retCode", -1)
-                if ret == 0:
-                    # Parse balance
-                    balance = 0.0
-                    try:
-                        for coin in data["result"]["list"][0]["coin"]:
-                            if coin["coin"] == "USDT":
-                                balance = float(coin["walletBalance"])
-                    except (KeyError, IndexError):
-                        pass
-
-                    report.add(DiagnosticResult(
-                        name="Authentication",
-                        passed=True,
-                        message="API key authenticated successfully!",
-                        details=f"USDT Balance: ${balance:.2f}"
-                    ))
-
-                    # Balance check
-                    if balance < 1:
-                        report.add(DiagnosticResult(
-                            name="Balance",
-                            passed=False,
-                            message=f"USDT balance too low: ${balance:.2f}",
-                            fix="Deposit USDT to your Bybit account\n"
-                                "      For testnet: use Bybit testnet faucet to get free USDT"
-                        ))
-                    else:
-                        report.add(DiagnosticResult(
-                            name="Balance",
-                            passed=True,
-                            message=f"USDT available: ${balance:.2f}"
-                        ))
-                else:
-                    err = get_error_info(ret)
+                if not isinstance(data, dict):
                     report.add(DiagnosticResult(
                         name="Authentication",
                         passed=False,
-                        message=f"retCode {ret}: {err.name}",
-                        details=data.get("retMsg", ""),
-                        fix=err.user_message
+                        message="Auth response was not a JSON object",
+                        details=f"Response type: {type(data).__name__}",
+                        fix="Verify proxy/CDN is not altering Bybit API responses"
                     ))
+                else:
+                    ret = data.get("retCode", -1)
+                    if ret == 0:
+                        # Parse balance
+                        balance = 0.0
+                        try:
+                            for coin in data["result"]["list"][0]["coin"]:
+                                if coin["coin"] == "USDT":
+                                    balance = float(coin["walletBalance"])
+                        except (KeyError, IndexError):
+                            pass
+
+                        report.add(DiagnosticResult(
+                            name="Authentication",
+                            passed=True,
+                            message="API key authenticated successfully!",
+                            details=f"USDT Balance: ${balance:.2f}"
+                        ))
+
+                        # Balance check
+                        if balance < 1:
+                            report.add(DiagnosticResult(
+                                name="Balance",
+                                passed=False,
+                                message=f"USDT balance too low: ${balance:.2f}",
+                                fix="Deposit USDT to your Bybit account\n"
+                                    "      For testnet: use Bybit testnet faucet to get free USDT"
+                            ))
+                        else:
+                            report.add(DiagnosticResult(
+                                name="Balance",
+                                passed=True,
+                                message=f"USDT available: ${balance:.2f}"
+                            ))
+                    else:
+                        err = get_error_info(ret)
+                        report.add(DiagnosticResult(
+                            name="Authentication",
+                            passed=False,
+                            message=f"retCode {ret}: {err.name}",
+                            details=data.get("retMsg", ""),
+                            fix=err.user_message
+                        ))
             except Exception as e:
                 report.add(DiagnosticResult(
                     name="Authentication",
@@ -581,9 +590,19 @@ async def run_diagnostics(api_key: str, api_secret: str,
                     f"{base_url}/v5/position/list",
                     params=params, headers=headers
                 ) as resp:
-                    data = await resp.json()
+                    data = await resp.json(content_type=None)
 
-                ret = data.get("retCode", -1)
+                if not isinstance(data, dict):
+                    report.add(DiagnosticResult(
+                        name="Trading Permissions",
+                        passed=False,
+                        message="Permission response was not a JSON object",
+                        details=f"Response type: {type(data).__name__}",
+                        fix="Verify proxy/CDN is not altering Bybit API responses"
+                    ))
+                    ret = -1
+                else:
+                    ret = data.get("retCode", -1)
                 if ret == 0:
                     report.add(DiagnosticResult(
                         name="Trading Permissions",
