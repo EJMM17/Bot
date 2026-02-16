@@ -172,7 +172,7 @@ class BybitAdapter(MarketAdapter):
                     await self.session.close()
 
                 self.session = aiohttp.ClientSession(
-                    timeout=timeout, connector=connector
+                    timeout=timeout, connector=connector, trust_env=True
                 )
                 await self._sync_time()
 
