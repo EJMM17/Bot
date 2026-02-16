@@ -161,15 +161,17 @@ class BybitAdapter(MarketAdapter):
             raise ImportError("aiohttp required: pip install aiohttp")
 
         timeout = aiohttp.ClientTimeout(total=15, connect=10)
-        connector = aiohttp.TCPConnector(
-            limit=10, ttl_dns_cache=300, enable_cleanup_closed=True,
-        )
         env = "TESTNET" if self.is_testnet else "MAINNET"
 
         for attempt in range(3):
             try:
                 if self.session and not self.session.closed:
                     await self.session.close()
+                    self.session = None
+
+                connector = aiohttp.TCPConnector(
+                    limit=10, ttl_dns_cache=300, enable_cleanup_closed=True,
+                )
 
                 self.session = aiohttp.ClientSession(
                     timeout=timeout, connector=connector, trust_env=True
@@ -183,6 +185,7 @@ class BybitAdapter(MarketAdapter):
                         print(f"   Bybit blocks US and Mainland China IPs.")
                         print(f"   Solution: Deploy on a server in EU, Singapore, or Japan.")
                         print(f"   Recommended: DigitalOcean Singapore ($6/mo) or Hetzner EU (€4/mo)")
+                        await self.disconnect()
                         return False
 
                     data = await resp.json()
@@ -215,6 +218,11 @@ class BybitAdapter(MarketAdapter):
 
             except Exception as e:
                 print(f"⚠️ [Bybit {env}] Error (attempt {attempt+1}/3): {e}")
+
+            finally:
+                if not self.is_connected and self.session and not self.session.closed:
+                    await self.session.close()
+                    self.session = None
 
             if attempt < 2:
                 await asyncio.sleep(2 ** attempt)
