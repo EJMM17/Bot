@@ -67,7 +67,8 @@ async def run_forever(config: AgentConfig, mode: str = "test"):
     except Exception as e:
         print(f"  ⚠️  Dashboard failed: {e}")
 
-    for attempt in range(100):
+    # Run indefinitely for 24/7 evolution unless capital is fully lost or process is stopped.
+    while True:
         agent = spawn(config, mode)
         agent_gen = agent.generation
 
