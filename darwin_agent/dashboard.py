@@ -131,7 +131,14 @@ async def handle_config_post(req):
 
     cfg = _config if _config else load_config(_config_path)
 
-    for key in ("starting_capital", "heartbeat_interval", "log_level", "dashboard_port"):
+    for key in (
+        "starting_capital",
+        "heartbeat_interval",
+        "log_level",
+        "dashboard_port",
+        "scan_timeframe",
+        "aggression_level",
+    ):
         if key in payload:
             value = payload[key]
             if value is None:
@@ -257,12 +264,14 @@ label{font-size:11px;color:var(--d);display:block;margin-bottom:4px}
 <div id="brain-m"></div>
 </div>
 <div class="card full">
-<h2>Dashboard Config (API keys y settings)</h2>
+<h2>Dashboard Config (API keys + modo agresivo)</h2>
 <div class="frm">
 <div><label>Starting Capital</label><input id="cfg-starting-capital" type="number" step="0.1"></div>
 <div><label>Heartbeat Interval</label><input id="cfg-heartbeat" type="number"></div>
 <div><label>Dashboard Port</label><input id="cfg-port" type="number"></div>
 <div><label>Log Level</label><input id="cfg-log-level" type="text"></div>
+<div><label>Scan Timeframe</label><select id="cfg-scan-timeframe"><option value="1m">1m</option><option value="5m">5m</option><option value="15m">15m</option><option value="1h">1h</option></select></div>
+<div><label>Aggression Level</label><input id="cfg-aggression" type="number" step="0.05" min="0.5" max="3"></div>
 <div><label>Crypto Enabled</label><select id="cfg-enabled"><option value="true">true</option><option value="false">false</option></select></div>
 <div><label>Crypto Testnet</label><select id="cfg-testnet"><option value="true">true</option><option value="false">false</option></select></div>
 <div><label>Bybit API Key</label><input id="cfg-api-key" type="text"></div>
@@ -314,6 +323,13 @@ function saveTokenAndLoad(){
   loadConfig();
 }
 
+function parseNumber(id, parser){
+  const raw=document.getElementById(id).value;
+  const value=parser(raw);
+  if(Number.isNaN(value) || !Number.isFinite(value)) return null;
+  return value;
+}
+
 async function loadConfig(){
   try{
     const r=await fetch('/api/config',{headers:authHeaders()});
@@ -331,6 +347,8 @@ async function loadConfig(){
     document.getElementById('cfg-heartbeat').value=c.heartbeat_interval??45;
     document.getElementById('cfg-port').value=c.dashboard_port??8080;
     document.getElementById('cfg-log-level').value=c.log_level??'INFO';
+    document.getElementById('cfg-scan-timeframe').value=c.scan_timeframe??'1m';
+    document.getElementById('cfg-aggression').value=c.aggression_level??1.35;
     document.getElementById('cfg-enabled').value=String(m.enabled??true);
     document.getElementById('cfg-testnet').value=String(m.testnet??true);
     document.getElementById('cfg-api-key').value=m.api_key??'';
@@ -343,22 +361,29 @@ async function loadConfig(){
 
 async function saveConfig(){
   const payload={
-    starting_capital:parseFloat(document.getElementById('cfg-starting-capital').value),
-    heartbeat_interval:parseInt(document.getElementById('cfg-heartbeat').value),
-    dashboard_port:parseInt(document.getElementById('cfg-port').value),
+    starting_capital:parseNumber('cfg-starting-capital', parseFloat),
+    heartbeat_interval:parseNumber('cfg-heartbeat', v=>parseInt(v,10)),
+    dashboard_port:parseNumber('cfg-port', v=>parseInt(v,10)),
     log_level:document.getElementById('cfg-log-level').value,
+    scan_timeframe:document.getElementById('cfg-scan-timeframe').value,
+    aggression_level:parseNumber('cfg-aggression', parseFloat),
     markets:{
       crypto:{
         enabled:document.getElementById('cfg-enabled').value==='true',
         testnet:document.getElementById('cfg-testnet').value==='true',
-        api_key:document.getElementById('cfg-api-key').value,
-        api_secret:document.getElementById('cfg-api-secret').value,
-        max_allocation_pct:parseFloat(document.getElementById('cfg-max-allocation').value)
+        api_key:document.getElementById('cfg-api-key').value.trim(),
+        api_secret:document.getElementById('cfg-api-secret').value.trim(),
+        max_allocation_pct:parseNumber('cfg-max-allocation', parseFloat)
       }
     }
   };
 
   const el=document.getElementById('cfg-msg');
+  if(payload.starting_capital===null || payload.heartbeat_interval===null || payload.dashboard_port===null ||
+     payload.aggression_level===null || payload.markets.crypto.max_allocation_pct===null){
+    el.innerHTML='<span class="r">Invalid numeric field(s). Please review the form.</span>';
+    return;
+  }
   el.textContent='Saving...';
   try{
     const r=await fetch('/api/config',{method:'POST',headers:authHeaders({'Content-Type':'application/json'}),body:JSON.stringify(payload)});

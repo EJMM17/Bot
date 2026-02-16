@@ -105,6 +105,22 @@ class DarwinAgentV2:
         # Adaptive graduation: progressive threshold
         self._graduation_check_interval = 50  # Check every 50 trades
 
+        # Configurable scan speed / aggression
+        self._scan_timeframe = self._resolve_timeframe(config.scan_timeframe)
+        self._aggression_level = max(0.5, min(3.0, float(config.aggression_level)))
+        self._candle_lookback = 120 if self._scan_timeframe == TimeFrame.M1 else 100
+
+    def _resolve_timeframe(self, timeframe_value: str) -> TimeFrame:
+        mapping = {
+            "1m": TimeFrame.M1,
+            "5m": TimeFrame.M5,
+            "15m": TimeFrame.M15,
+            "1h": TimeFrame.H1,
+            "4h": TimeFrame.H4,
+            "1d": TimeFrame.D1,
+        }
+        return mapping.get((timeframe_value or "15m").lower(), TimeFrame.M15)
+
     def _inherit_ml(self):
         if self.generation == 0:
             self.logger.evolution("Gen-0: Fresh brain, no ancestors")
@@ -277,7 +293,10 @@ class DarwinAgentV2:
             await self._die("No markets available")
             return
 
-        self.logger.info(f"Phase: {self.phase.value} | Heartbeat: {self.config.heartbeat_interval}s")
+        self.logger.info(
+            f"Phase: {self.phase.value} | Heartbeat: {self.config.heartbeat_interval}s | "
+            f"Scan: {self._scan_timeframe.value} | Aggression: {self._aggression_level:.2f}"
+        )
 
         try:
             while self.health.is_alive:
@@ -393,20 +412,25 @@ class DarwinAgentV2:
                 continue
 
             try:
-                candles = await adapter.get_candles(symbol, TimeFrame.M15, limit=100)
+                candles = await adapter.get_candles(symbol, self._scan_timeframe, limit=self._candle_lookback)
                 if not candles or len(candles) < 50:
                     continue
 
                 self._last_candles[symbol] = candles
                 hp = self.health.current_hp / self.health.max_hp
-                decision = self.selector.decide(candles, symbol, TimeFrame.M15, hp)
+                decision = self.selector.decide(candles, symbol, self._scan_timeframe, hp)
 
                 if decision.should_trade and decision.signal:
                     positions = await adapter.get_open_positions()
                     ok, reason = self.risk.approve_trade(
                         decision.signal, self.health.current_capital, len(positions))
                     if ok:
-                        placed = await self._execute(decision, adapter)
+                        # Fast/aggressive mode: increase size and react to smaller moves
+                        placed = await self._execute(
+                            decision,
+                            adapter,
+                            sizing_mult=self._aggression_level * self._volatility_sizing(candles),
+                        )
                         if placed:
                             self.incubation_trades += 1
                     else:
@@ -472,13 +496,13 @@ class DarwinAgentV2:
                 continue
 
             try:
-                candles = await adapter.get_candles(symbol, TimeFrame.M15, limit=100)
+                candles = await adapter.get_candles(symbol, self._scan_timeframe, limit=self._candle_lookback)
                 if not candles or len(candles) < 50:
                     continue
 
                 self._last_candles[symbol] = candles
                 hp = self.health.current_hp / self.health.max_hp
-                decision = self.selector.decide(candles, symbol, TimeFrame.M15, hp)
+                decision = self.selector.decide(candles, symbol, self._scan_timeframe, hp)
 
                 if decision.should_trade and decision.signal:
                     positions = await adapter.get_open_positions()
@@ -490,7 +514,7 @@ class DarwinAgentV2:
                             decision.action.sizing if decision.action else "normal", 1.0)
                         vol_mult = self._volatility_sizing(candles)
                         health_mult = self._health_sizing(hp)
-                        final_mult = base_mult * vol_mult * health_mult
+                        final_mult = base_mult * vol_mult * health_mult * self._aggression_level
                         await self._execute(decision, adapter, final_mult)
                     else:
                         self.selector.report_result(0, 0)
@@ -575,7 +599,7 @@ class DarwinAgentV2:
 
         # Adaptive cooldown
         if self.health.loss_streak >= 2:
-            mins = self.health.loss_streak * self._learned_cooldown_mult
+            mins = self.health.loss_streak * self._learned_cooldown_mult / max(0.75, self._aggression_level)
             self.cooldown_until = _utcnow() + timedelta(minutes=mins)
             self.logger.warning(f"Cooldown {mins:.0f}min (streak:{self.health.loss_streak}, mult:{self._learned_cooldown_mult:.1f})")
             # Record for learning
@@ -696,4 +720,6 @@ class DarwinAgentV2:
             "inherited_rules": len(self.dna.rules),
             "watchlist": self.watchlist,
             "cooldown_multiplier": round(self._learned_cooldown_mult, 1),
+            "scan_timeframe": self._scan_timeframe.value,
+            "aggression_level": round(self._aggression_level, 2),
         }

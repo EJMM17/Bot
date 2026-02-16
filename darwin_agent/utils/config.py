@@ -56,6 +56,8 @@ class AgentConfig:
     log_level: str = "INFO"
     heartbeat_interval: int = 60
     dashboard_port: int = 8080
+    scan_timeframe: str = "1m"
+    aggression_level: float = 1.35
 
     def validate(self):
         errors = []
@@ -69,6 +71,11 @@ class AgentConfig:
             errors.append("Death threshold must be below starting capital")
         if not any(m.enabled for m in self.markets.values()):
             errors.append("At least one market must be enabled")
+        allowed_timeframes = {"1m", "5m", "15m", "1h", "4h", "1d"}
+        if self.scan_timeframe not in allowed_timeframes:
+            errors.append(f"scan_timeframe must be one of: {', '.join(sorted(allowed_timeframes))}")
+        if not (0.5 <= self.aggression_level <= 3.0):
+            errors.append("aggression_level must be between 0.5 and 3.0")
         if errors:
             raise ValueError("Config errors: " + "; ".join(errors))
 
@@ -85,7 +92,14 @@ def load_config(path: str = "config.yaml") -> AgentConfig:
         except yaml.YAMLError as e:
             raise ValueError(f"Invalid YAML in config file '{path}': {e}") from e
 
-    for key in ("starting_capital", "heartbeat_interval", "log_level", "dashboard_port"):
+    for key in (
+        "starting_capital",
+        "heartbeat_interval",
+        "log_level",
+        "dashboard_port",
+        "scan_timeframe",
+        "aggression_level",
+    ):
         if key in data:
             setattr(config, key, type(getattr(config, key))(data[key]))
 
@@ -117,6 +131,8 @@ def config_to_dict(config: AgentConfig) -> Dict:
         "heartbeat_interval": config.heartbeat_interval,
         "log_level": config.log_level,
         "dashboard_port": config.dashboard_port,
+        "scan_timeframe": config.scan_timeframe,
+        "aggression_level": config.aggression_level,
         "markets": {
             name: {
                 "enabled": market.enabled,

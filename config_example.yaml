@@ -4,9 +4,11 @@
 # Copy to config.yaml and add your Bybit API keys
 
 starting_capital: 50.0
-heartbeat_interval: 45       # seconds between cycles
+heartbeat_interval: 20       # segundos entre ciclos (más rápido = más señales)
 log_level: "INFO"
 dashboard_port: 8080
+scan_timeframe: "1m"        # 1m/5m/15m/1h
+aggression_level: 1.35       # 1.0 normal | >1.0 más agresivo
 
 # ----- MARKETS -----
 markets:
