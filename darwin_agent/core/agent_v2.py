@@ -95,11 +95,12 @@ class DarwinAgentV2:
         if self.generation == 0:
             self.logger.evolution("Gen-0: Fresh brain, no ancestors")
             return
-        brain_path = f"data/generations/brain_gen_{self.generation - 1:04d}.json"
+        dna_dir = self.config.evolution.dna_path
+        brain_path = os.path.join(dna_dir, f"brain_gen_{self.generation - 1:04d}.json")
         try:
             self.brain.load(brain_path, as_inheritance=True)
             self.logger.evolution(f"Inherited brain from Gen-{self.generation - 1}")
-            sel_path = f"data/generations/selector_gen_{self.generation - 1:04d}.json"
+            sel_path = os.path.join(dna_dir, f"selector_gen_{self.generation - 1:04d}.json")
             if os.path.exists(sel_path):
                 with open(sel_path) as f:
                     self.selector.import_from_dna(json.load(f), mutation_rate=0.03)
@@ -333,8 +334,9 @@ class DarwinAgentV2:
                     ok, reason = self.risk.approve_trade(
                         decision.signal, self.health.current_capital, len(positions))
                     if ok:
-                        await self._execute(decision, adapter)
-                        self.incubation_trades += 1
+                        placed = await self._execute(decision, adapter)
+                        if placed:
+                            self.incubation_trades += 1
                     else:
                         self.selector.report_result(0, 0)
                 else:
@@ -396,10 +398,10 @@ class DarwinAgentV2:
                 self._symbol_errors[symbol] = self._symbol_errors.get(symbol, 0) + 1
                 self.logger.error(f"{symbol}: {e}")
 
-    async def _execute(self, decision, adapter, sizing_mult=1.0):
+    async def _execute(self, decision, adapter, sizing_mult=1.0) -> bool:
         signal = decision.signal
         if not signal:
-            return
+            return False
 
         size = self.risk.calculate_position_size(
             self.health.current_capital, signal.entry_price, signal.stop_loss)
@@ -407,7 +409,7 @@ class DarwinAgentV2:
 
         min_size = await adapter.get_min_trade_size(signal.symbol)
         if size < min_size:
-            return
+            return False
 
         result = await adapter.place_order(
             symbol=signal.symbol, side=signal.side, order_type=OrderType.MARKET,
@@ -419,8 +421,10 @@ class DarwinAgentV2:
                 action=signal.side.value.upper(), market="crypto",
                 symbol=signal.symbol, amount=size, price=signal.entry_price,
                 reason=f"[{strat}] {signal.reason}")
+            return True
         else:
             self.logger.warning(f"Order failed: {result.error}")
+            return False
 
     def _process_result(self, pnl, pnl_pct, symbol):
         old_hp = self.health.current_hp
@@ -470,6 +474,20 @@ class DarwinAgentV2:
         self.dna.win_rate = self.health.win_rate
         self.dna.max_drawdown_pct = self.health.current_drawdown_pct
 
+        # Populate strategy_genes from this generation's actual trading data
+        # (replace inherited aggregate with current gen's own results)
+        self.dna.strategy_genes = {}
+        for rs in self.selector.regime_stats.values():
+            for strat_name, sr in rs.strategy_results.items():
+                if strat_name not in self.dna.strategy_genes:
+                    self.dna.strategy_genes[strat_name] = StrategyGene(name=strat_name)
+                gene = self.dna.strategy_genes[strat_name]
+                gene.times_used += sr.get("trades", 0)
+                gene.wins += sr.get("wins", 0)
+                gene.losses += sr.get("trades", 0) - sr.get("wins", 0)
+                gene.total_pnl += sr.get("total_pnl", 0.0)
+                gene.avg_pnl_per_trade = gene.total_pnl / gene.times_used if gene.times_used > 0 else 0.0
+
         for g in self.dna.strategy_genes.values():
             g.update_confidence()
 
@@ -482,9 +500,10 @@ class DarwinAgentV2:
         if "incubation" in cause.lower():
             self.dna.rules.append(f"Gen-{self.generation}: Failed paper trading")
 
-        os.makedirs("data/generations", exist_ok=True)
-        self.brain.save(f"data/generations/brain_gen_{self.generation:04d}.json")
-        with open(f"data/generations/selector_gen_{self.generation:04d}.json", "w") as f:
+        dna_dir = self.config.evolution.dna_path
+        os.makedirs(dna_dir, exist_ok=True)
+        self.brain.save(os.path.join(dna_dir, f"brain_gen_{self.generation:04d}.json"))
+        with open(os.path.join(dna_dir, f"selector_gen_{self.generation:04d}.json"), "w") as f:
             json.dump(self.selector.export_for_dna(), f, indent=2)
 
         self.evolution.save_dna(self.dna)
