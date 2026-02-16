@@ -1,4 +1,4 @@
-# 🧬 Darwin Agent v2.2 — Guía Completa de Deploy desde el Celular
+# 🧬 Darwin Agent v2.3 — Guia Completa de Deploy desde el Celular
 
 ## 🎯 Resumen: De $50 a Miles
 
@@ -75,11 +75,11 @@ Sube el ZIP a un repo privado de GitHub, luego:
 git clone https://github.com/TU_USUARIO/darwin-agent.git .
 ```
 
-**Opción B — Subir ZIP directo:**
-En Termius, usa la función SFTP para subir `darwin_agent_v2.2.zip`, luego:
+**Opcion B — Subir ZIP directo:**
+En Termius, usa la funcion SFTP para subir `darwin_agent_v2.3.zip`, luego:
 ```bash
 cd /root
-unzip darwin_agent_v2.2.zip
+unzip darwin_agent_v2.3.zip
 cp -r darwin_agent_final/* /root/darwin_agent/
 cd /root/darwin_agent
 ```
@@ -303,6 +303,110 @@ free -m
 # Si se agota, reiniciar
 systemctl restart darwin-agent
 ```
+
+---
+
+## 🔄 Actualizar una Version Existente en DigitalOcean
+
+Si ya tienes Darwin Agent corriendo en tu Droplet y quieres actualizar a una version nueva (ej: v2.2 -> v2.3), sigue estos pasos:
+
+### Opcion A — Actualizar desde GitHub (recomendado)
+
+Si hiciste deploy con `git clone`:
+
+```bash
+# 1. Parar el agente
+sudo systemctl stop darwin-agent
+
+# 2. Ir al directorio del proyecto
+cd /root/darwin_agent
+
+# 3. Guardar cambios locales (tu config.yaml)
+cp config.yaml config.yaml.backup
+
+# 4. Bajar la version nueva
+git pull origin main
+
+# 5. Actualizar dependencias
+source venv/bin/activate
+pip install -r requirements.txt -q
+
+# 6. Restaurar tu config (si git la sobreescribio)
+cp config.yaml.backup config.yaml
+
+# 7. Verificar que funciona
+python -m darwin_agent.main --diagnose
+
+# 8. Reiniciar el servicio
+sudo systemctl start darwin-agent
+
+# 9. Verificar que arranco bien
+sudo systemctl status darwin-agent
+journalctl -u darwin-agent -f
+```
+
+### Opcion B — Actualizar subiendo ZIP nuevo
+
+Si hiciste deploy subiendo el ZIP por SFTP:
+
+```bash
+# 1. Parar el agente
+sudo systemctl stop darwin-agent
+
+# 2. Guardar tu config y datos de evolucion
+cp /root/darwin_agent/config.yaml /root/config.yaml.backup
+cp -r /root/darwin_agent/data /root/darwin_data_backup
+
+# 3. Subir el ZIP nuevo por SFTP a /root/ y luego:
+cd /root
+unzip darwin_agent_v2.3.zip
+
+# 4. Copiar archivos nuevos (sin borrar data/)
+cp -r darwin_agent_final/darwin_agent/* /root/darwin_agent/darwin_agent/
+cp darwin_agent_final/requirements.txt /root/darwin_agent/
+cp darwin_agent_final/config_example.yaml /root/darwin_agent/
+cp darwin_agent_final/deploy.sh /root/darwin_agent/
+cp darwin_agent_final/Dockerfile /root/darwin_agent/
+cp darwin_agent_final/docker-compose.yml /root/darwin_agent/
+
+# 5. Restaurar tu config
+cp /root/config.yaml.backup /root/darwin_agent/config.yaml
+
+# 6. Actualizar dependencias
+cd /root/darwin_agent
+source venv/bin/activate
+pip install -r requirements.txt -q
+
+# 7. Verificar que funciona
+python -m darwin_agent.main --diagnose
+
+# 8. Reiniciar el servicio
+sudo systemctl start darwin-agent
+
+# 9. Verificar
+sudo systemctl status darwin-agent
+journalctl -u darwin-agent -f
+```
+
+### Opcion C — Usar el script de actualizacion automatica
+
+```bash
+# Subir update.sh al servidor y ejecutar:
+cd /root/darwin_agent
+bash update.sh
+```
+
+### Notas Importantes sobre Actualizaciones
+
+- **Tu config.yaml NO se pierde** — siempre se hace backup antes de actualizar
+- **Los datos de evolucion se conservan** — la carpeta `data/` no se toca
+- **El DNA y el brain se heredan** — las generaciones anteriores siguen vivas
+- **Si algo sale mal**, restaura el backup:
+  ```bash
+  cp /root/config.yaml.backup /root/darwin_agent/config.yaml
+  cp -r /root/darwin_data_backup/* /root/darwin_agent/data/
+  sudo systemctl start darwin-agent
+  ```
 
 ---
 
