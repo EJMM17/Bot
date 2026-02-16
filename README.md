@@ -7,7 +7,7 @@ Autonomous evolutionary crypto trading system. AI agents trade USDT perpetual fu
 ## Features
 
 - **Evolutionary lifecycle** — agents are born, trade, die, and pass learned knowledge to the next generation via DNA encoding
-- **Q-Learning brain** — 30-dimensional feature engineering with linear function approximation and experience replay
+- **Q-Learning brain** — 30-dimensional feature engineering with linear approximation, experience replay, retrieval-style pattern memory, online trade-outcome ML, and explainable decision traces
 - **4 trading strategies** — Momentum (EMA crossover), Mean Reversion (Bollinger), Scalping (VWAP), Breakout (range)
 - **Adaptive regime detection** — automatically selects strategies based on market conditions (trending, choppy, ranging)
 - **Health system** — HP-based survival mechanic that enforces discipline and kills underperforming agents
