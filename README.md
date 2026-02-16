@@ -53,8 +53,11 @@ python -m darwin_agent --mode live
 ## Docker
 
 ```bash
-# Start (paper trading by default)
+# Start (paper trading by default, uses config_example.yaml if config.yaml is missing)
 docker-compose up -d
+
+# Optional: use a custom config file
+CONFIG_FILE=./config.yaml docker-compose up -d
 
 # Monitor logs
 docker-compose logs -f

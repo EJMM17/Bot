@@ -9,7 +9,9 @@ services:
       - "8080:8080"
     volumes:
       - darwin-data:/app/data
-      - ./config.yaml:/app/config.yaml:ro
+      # Use config_example.yaml by default so first run works even after clone/unzip.
+      # To use a custom file: CONFIG_FILE=./config.yaml docker-compose up -d
+      - ${CONFIG_FILE:-./config_example.yaml}:/app/config.yaml:ro
     environment:
       - PYTHONUNBUFFERED=1
       - TZ=UTC
