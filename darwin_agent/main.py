@@ -9,7 +9,7 @@ import os
 from darwin_agent.core.agent_v2 import DarwinAgentV2, AgentPhase
 from darwin_agent.utils.config import load_config, AgentConfig
 from darwin_agent.evolution.dna import EvolutionEngine
-from darwin_agent.dashboard import set_agent, start_dashboard
+from darwin_agent.dashboard import set_agent, set_config_context, start_dashboard
 
 BANNER = """
 ╔═══════════════════════════════════════════════════╗
@@ -190,6 +190,7 @@ def main():
     args = parser.parse_args()
 
     config = load_config(args.config)
+    set_config_context(config, args.config)
 
     if args.status:
         show_status(config)

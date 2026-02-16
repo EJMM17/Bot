@@ -102,3 +102,52 @@ def load_config(path: str = "config.yaml") -> AgentConfig:
                     setattr(obj, k, v)
 
     return config
+
+
+def config_to_dict(config: AgentConfig) -> Dict:
+    """Serialize AgentConfig to plain dict for APIs/YAML dump."""
+    return {
+        "starting_capital": config.starting_capital,
+        "heartbeat_interval": config.heartbeat_interval,
+        "log_level": config.log_level,
+        "dashboard_port": config.dashboard_port,
+        "markets": {
+            name: {
+                "enabled": market.enabled,
+                "api_key": market.api_key,
+                "api_secret": market.api_secret,
+                "testnet": market.testnet,
+                "max_allocation_pct": market.max_allocation_pct,
+            }
+            for name, market in config.markets.items()
+        },
+        "health": {
+            "starting_hp": config.health.starting_hp,
+            "instant_death_capital": config.health.instant_death_capital,
+            "critical_capital": config.health.critical_capital,
+            "critical_hp_penalty": config.health.critical_hp_penalty,
+            "max_drawdown_pct": config.health.max_drawdown_pct,
+            "drawdown_hp_penalty": config.health.drawdown_hp_penalty,
+        },
+        "risk": {
+            "max_position_pct": config.risk.max_position_pct,
+            "max_open_positions": config.risk.max_open_positions,
+            "max_daily_trades": config.risk.max_daily_trades,
+            "max_daily_loss_pct": config.risk.max_daily_loss_pct,
+            "default_stop_loss_pct": config.risk.default_stop_loss_pct,
+            "default_take_profit_pct": config.risk.default_take_profit_pct,
+            "min_risk_reward_ratio": config.risk.min_risk_reward_ratio,
+        },
+        "evolution": {
+            "incubation_candles": config.evolution.incubation_candles,
+            "min_graduation_winrate": config.evolution.min_graduation_winrate,
+            "dna_path": config.evolution.dna_path,
+            "max_generations_memory": config.evolution.max_generations_memory,
+        },
+    }
+
+
+def save_config(config: AgentConfig, path: str = "config.yaml"):
+    """Persist AgentConfig into YAML file."""
+    with open(path, "w") as f:
+        yaml.safe_dump(config_to_dict(config), f, sort_keys=False)

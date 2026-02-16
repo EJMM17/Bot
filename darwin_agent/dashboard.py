@@ -3,20 +3,28 @@
 import asyncio
 import json
 import glob
-import os
-from datetime import datetime
 
 try:
     from aiohttp import web
 except ImportError:
     web = None
 
+from darwin_agent.utils.config import load_config, save_config, config_to_dict
+
 _agent = None
+_config = None
+_config_path = "config.yaml"
 
 
 def set_agent(agent):
     global _agent
     _agent = agent
+
+
+def set_config_context(config, config_path="config.yaml"):
+    global _config, _config_path
+    _config = config
+    _config_path = config_path
 
 
 def _load_generations():
@@ -58,6 +66,39 @@ async def handle_trades(req):
     return web.json_response(_load_trades())
 
 
+async def handle_config_get(req):
+    cfg = _config if _config else load_config(_config_path)
+    return web.json_response(config_to_dict(cfg))
+
+
+async def handle_config_post(req):
+    global _config
+    payload = await req.json()
+    cfg = _config if _config else load_config(_config_path)
+
+    for key in ("starting_capital", "heartbeat_interval", "log_level", "dashboard_port"):
+        if key in payload:
+            setattr(cfg, key, type(getattr(cfg, key))(payload[key]))
+
+    if "markets" in payload:
+        for name, mdata in payload["markets"].items():
+            if name not in cfg.markets:
+                continue
+            market = cfg.markets[name]
+            for field in ("enabled", "api_key", "api_secret", "testnet", "max_allocation_pct"):
+                if field in mdata:
+                    setattr(market, field, mdata[field])
+
+    try:
+        cfg.validate()
+    except ValueError as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=400)
+
+    save_config(cfg, _config_path)
+    _config = cfg
+    return web.json_response({"ok": True})
+
+
 async def handle_index(req):
     return web.Response(text=HTML, content_type="text/html")
 
@@ -93,6 +134,12 @@ td{padding:5px 6px;border-bottom:1px solid #1a1f28}
 .bg{background:#14532d;color:var(--g)}.br{background:#450a0a;color:var(--r)}.by{background:#422006;color:var(--y)}.bb{background:#172554;color:var(--bl)}
 .ft{text-align:center;padding:8px;color:var(--d);font-size:11px}
 .dot{width:6px;height:6px;border-radius:50%;display:inline-block;margin-right:4px;animation:pulse 2s infinite}
+input,select{width:100%;background:#0f1520;border:1px solid var(--b);border-radius:6px;color:var(--t);padding:8px;font-size:12px}
+label{font-size:11px;color:var(--d);display:block;margin-bottom:4px}
+.frm{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.frm .full{grid-column:1/-1}
+.btn{background:var(--bl);color:white;border:0;border-radius:6px;padding:9px 12px;font-weight:600;cursor:pointer}
+#cfg-msg{font-size:12px;margin-top:8px}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
 .dot-g{background:var(--g)}.dot-r{background:var(--r)}.dot-y{background:var(--y)}
 </style>
@@ -124,6 +171,21 @@ td{padding:5px 6px;border-bottom:1px solid #1a1f28}
 <div id="brain-m"></div>
 </div>
 <div class="card full">
+<h2>Dashboard Config (API keys y settings)</h2>
+<div class="frm">
+<div><label>Starting Capital</label><input id="cfg-starting-capital" type="number" step="0.1"></div>
+<div><label>Heartbeat Interval</label><input id="cfg-heartbeat" type="number"></div>
+<div><label>Dashboard Port</label><input id="cfg-port" type="number"></div>
+<div><label>Log Level</label><input id="cfg-log-level" type="text"></div>
+<div><label>Crypto Enabled</label><select id="cfg-enabled"><option value="true">true</option><option value="false">false</option></select></div>
+<div><label>Crypto Testnet</label><select id="cfg-testnet"><option value="true">true</option><option value="false">false</option></select></div>
+<div><label>Bybit API Key</label><input id="cfg-api-key" type="text"></div>
+<div><label>Bybit API Secret</label><input id="cfg-api-secret" type="password"></div>
+<div class="full"><label>Max Allocation %</label><input id="cfg-max-allocation" type="number" step="0.1"></div>
+<div class="full"><button class="btn" onclick="saveConfig()">Save Config</button><div id="cfg-msg"></div></div>
+</div>
+</div>
+<div class="card full">
 <h2>Playbook</h2>
 <table><thead><tr><th>Regime</th><th>Strategy</th><th>WR</th><th>#</th><th>P&L</th></tr></thead>
 <tbody id="pb"></tbody></table>
@@ -145,6 +207,57 @@ td{padding:5px 6px;border-bottom:1px solid #1a1f28}
 <script>
 function M(l,v,c=''){return `<div class="m"><span class="l">${l}</span><span class="v ${c}">${v}</span></div>`}
 function hc(p){return p>.7?'var(--g)':p>.4?'var(--y)':'var(--r)'}
+
+async function loadConfig(){
+  try{
+    const r=await fetch('/api/config');
+    const c=await r.json();
+    const m=(c.markets||{}).crypto||{};
+    document.getElementById('cfg-starting-capital').value=c.starting_capital??50;
+    document.getElementById('cfg-heartbeat').value=c.heartbeat_interval??45;
+    document.getElementById('cfg-port').value=c.dashboard_port??8080;
+    document.getElementById('cfg-log-level').value=c.log_level??'INFO';
+    document.getElementById('cfg-enabled').value=String(m.enabled??true);
+    document.getElementById('cfg-testnet').value=String(m.testnet??true);
+    document.getElementById('cfg-api-key').value=m.api_key??'';
+    document.getElementById('cfg-api-secret').value=m.api_secret??'';
+    document.getElementById('cfg-max-allocation').value=m.max_allocation_pct??60;
+  }catch(e){
+    document.getElementById('cfg-msg').innerHTML='<span class="r">Failed to load config</span>';
+  }
+}
+
+async function saveConfig(){
+  const payload={
+    starting_capital:parseFloat(document.getElementById('cfg-starting-capital').value),
+    heartbeat_interval:parseInt(document.getElementById('cfg-heartbeat').value),
+    dashboard_port:parseInt(document.getElementById('cfg-port').value),
+    log_level:document.getElementById('cfg-log-level').value,
+    markets:{
+      crypto:{
+        enabled:document.getElementById('cfg-enabled').value==='true',
+        testnet:document.getElementById('cfg-testnet').value==='true',
+        api_key:document.getElementById('cfg-api-key').value,
+        api_secret:document.getElementById('cfg-api-secret').value,
+        max_allocation_pct:parseFloat(document.getElementById('cfg-max-allocation').value)
+      }
+    }
+  };
+
+  const el=document.getElementById('cfg-msg');
+  el.textContent='Saving...';
+  try{
+    const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    if(!r.ok){
+      const t=await r.text();
+      el.innerHTML='<span class="r">Save failed: '+t+'</span>';
+      return;
+    }
+    el.innerHTML='<span class="g">Config saved. Restart recommended if you changed the port.</span>';
+  }catch(e){
+    el.innerHTML='<span class="r">Save failed</span>';
+  }
+}
 
 async function R(){
 try{
@@ -215,6 +328,7 @@ document.getElementById('dot').className='dot dot-r';
 document.getElementById('ts').textContent='Disconnected';
 }}
 
+loadConfig();
 R();setInterval(R,5000);
 </script>
 </body>
@@ -229,6 +343,8 @@ def create_app():
     app.router.add_get("/api/status", handle_status)
     app.router.add_get("/api/history", handle_history)
     app.router.add_get("/api/trades", handle_trades)
+    app.router.add_get("/api/config", handle_config_get)
+    app.router.add_post("/api/config", handle_config_post)
     return app
 
 
