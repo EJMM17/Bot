@@ -154,6 +154,16 @@ def config_to_dict(config: AgentConfig) -> Dict:
 
 
 def save_config(config: AgentConfig, path: str = "config.yaml"):
-    """Persist AgentConfig into YAML file."""
-    with open(path, "w") as f:
+    """Persist AgentConfig into YAML file.
+
+    Creates parent directories when needed and writes atomically to avoid
+    partial/corrupt config files if the process is interrupted.
+    """
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w") as f:
         yaml.safe_dump(config_to_dict(config), f, sort_keys=False)
+    os.replace(tmp_path, path)
